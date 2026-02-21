@@ -1,7 +1,7 @@
 import time
 import threading
 from dataclasses import dataclass
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Set
 
 import cv2
 
@@ -41,11 +41,8 @@ class ArucoTrackerThread(threading.Thread):
             try:
                 frame = self.camera.get_cv_frame()
 
-                # 1) Защита от пустых кадров (None, пустой numpy, 0x0)
-                if frame is None:
-                    time.sleep(0.01)
-                    continue
-                if not hasattr(frame, "size") or frame.size == 0:
+                # защита от пустого кадра
+                if frame is None or (hasattr(frame, "size") and frame.size == 0):
                     time.sleep(0.01)
                     continue
 
@@ -72,22 +69,14 @@ class ArucoTrackerThread(threading.Thread):
                     self.markers = markers_local
 
             except cv2.error as e:
-                # 2) На всякий случай: не роняем поток из-за OpenCV
                 print(f"[Video] OpenCV error (ignored): {e}")
                 time.sleep(0.02)
-                continue
             except Exception as e:
-                # 3) И любые другие ошибки тоже не должны убивать поток
                 print(f"[Video] Unexpected error (ignored): {e}")
                 time.sleep(0.05)
-                continue
 
     def stop(self):
         self.running = False
-
-
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
 
 
 def choose_next_marker(markers: Dict[int, MarkerInfo], visited: Set[int]) -> Optional[int]:
@@ -101,7 +90,7 @@ class DroneCommander:
         self.p = None
         if not dry_run:
             if Pioneer is None:
-                raise RuntimeError("pioneer_sdk недоступен, но dry_run=False")
+                raise RuntimeError("pioneer_sdk недоступен, но DRY_RUN=False")
             self.p = Pioneer()
 
     def arm_takeoff_to_height(self, z: float):
@@ -134,26 +123,21 @@ if __name__ == "__main__":
     # =========================
     # РЕЖИМЫ
     # =========================
-    DRY_RUN = True   # True: безполётный режим
+    DRY_RUN = True   # True: безполётный режим (не шлём команды)
 
     # =========================
     # НАСТРОЙКИ
     # =========================
     TAKEOFF_HEIGHT = 1.5
-    CENTER_TOL_PX = 40
-    LOOP_DT = 0.05
 
-    # x вправо (+), y вперёд (+)
-    V_MAX_X = 0.35
-    V_MAX_Z = 0.25
-    V_FORWARD = 0.15
+    CENTER_TOL_PX = 40   # допуск по центру
+    LOOP_DT = 0.05       # частота команд
 
-    KX = 0.35
-    KZ = 0.25
+    SPEED = 0.25          # м/с, модуль скорости в плоскости XY (регулируемая константа)
 
     SHOW_WINDOW = True
 
-    # Цвета для точки в центре (BGR)
+    # Цвета точки в центре (BGR)
     RED = (0, 0, 255)
     GREEN = (0, 255, 0)
 
@@ -165,7 +149,7 @@ if __name__ == "__main__":
     visited: Set[int] = set()
     last_target: Optional[int] = None
 
-    # Чтобы держать зелёную точку 3 секунды
+    # держать зелёную точку 3 секунды после “попадания”
     hold_green_until = 0.0
 
     try:
@@ -181,7 +165,7 @@ if __name__ == "__main__":
                 frame = tracker.latest_frame
                 markers = dict(tracker.markers)
 
-            if frame is None:
+            if frame is None or (hasattr(frame, "size") and frame.size == 0):
                 time.sleep(0.01)
                 continue
 
@@ -191,64 +175,77 @@ if __name__ == "__main__":
             # По умолчанию точка красная
             center_color = RED
 
-            # Если мы в “3 секунды зелёного” — держим зелёную точку независимо от маркеров
+            # Если идёт “зелёная пауза 3с” — точка зелёная и команд нет
             if time.time() < hold_green_until:
                 center_color = GREEN
-
-            # Управляющая логика
-            if not markers:
                 cmd.set_manual_speed_body_fixed(0, 0, 0, 0)
             else:
-                target_id = choose_next_marker(markers, visited)
-
-                if target_id is None:
+                # Нет маркеров — стоим
+                if not markers:
                     cmd.set_manual_speed_body_fixed(0, 0, 0, 0)
                 else:
-                    if target_id != last_target:
-                        print(f"[INFO] New target marker: {target_id}")
-                        last_target = target_id
+                    target_id = choose_next_marker(markers, visited)
 
-                    mi = markers[target_id]
-                    err_x = mi.cx - (w / 2.0)
-                    err_y = mi.cy - (h / 2.0)
-
-                    centered = (abs(err_x) <= CENTER_TOL_PX and abs(err_y) <= CENTER_TOL_PX)
-
-                    # Если маркер в центре И он ещё не посещён — точка зелёная
-                    if centered and (target_id not in visited) and (time.time() >= hold_green_until):
-                        center_color = GREEN
-
-                        # Останов
+                    # Все видимые посещены — стоим
+                    if target_id is None:
                         cmd.set_manual_speed_body_fixed(0, 0, 0, 0)
-
-                        # Отмечаем посещение и 3 секунды держим зелёную
-                        visited.add(target_id)
-                        print(f"[INFO] Marker {target_id} centered. Visited: {sorted(list(visited))}")
-                        hold_green_until = time.time() + 3.0
-
                     else:
-                        # Если сейчас идёт “зелёная пауза” — просто стоим
-                        if time.time() < hold_green_until:
+                        if target_id != last_target:
+                            print(f"[INFO] New target marker: {target_id}")
+                            last_target = target_id
+
+                        mi = markers[target_id]
+
+                        # Ошибки в пикселях относительно центра кадра
+                        dx_px = mi.cx - cx0   # + если маркер правее
+                        dy_px = mi.cy - cy0   # + если маркер ниже
+
+                        centered = (abs(dx_px) <= CENTER_TOL_PX and abs(dy_px) <= CENTER_TOL_PX)
+
+                        if centered and (target_id not in visited):
+                            # Над маркером -> зелёная точка
+                            center_color = GREEN
+
+                            # Останов + отметить посещение + 3 секунды зелёный режим
                             cmd.set_manual_speed_body_fixed(0, 0, 0, 0)
+                            visited.add(target_id)
+                            print(f"[INFO] Marker {target_id} centered. Visited: {sorted(list(visited))}")
+                            hold_green_until = time.time() + 3.0
                         else:
-                            # Наведение (точка остаётся красной)
-                            err_x_norm = err_x / (w / 2.0)
-                            err_y_norm = err_y / (h / 2.0)
+                            # Нужно смещаться -> красная точка (по умолчанию)
+                            # Вектор направления в XY:
+                            # x вправо, y вперёд (как ты указал, совпадает для камеры и дрона)
+                            dx = dx_px / (w / 2.0)   # примерно [-1..1]
+                            dy = dy_px / (h / 2.0)   # примерно [-1..1]
 
-                            vx = clamp(KX * err_x_norm, -V_MAX_X, V_MAX_X)  # x вправо(+)
-                            vz = clamp(-KZ * err_y_norm, -V_MAX_Z, V_MAX_Z) # при необходимости инвертируй знак
-                            vy = V_FORWARD                                 # y вперёд(+)
+                            norm = (dx * dx + dy * dy) ** 0.5
 
-                            cmd.set_manual_speed_body_fixed(vx=vx, vy=vy, vz=vz, yaw_rate=0)
+                            if norm < 1e-6:
+                                vx = 0.0
+                                vy = 0.0
+                            else:
+                                # Нормируем направление и задаём модуль SPEED
+                                vx = SPEED * (dx / norm)
+                                vy = SPEED * (dy / norm)
 
-            # Отрисовка
+                            # vz и yaw всегда 0
+                            cmd.set_manual_speed_body_fixed(vx=vx, vy=vy, vz=0, yaw_rate=0)
+
+            # Отрисовка (точка центра и инфо)
             if SHOW_WINDOW:
                 cv2.circle(frame, (cx0, cy0), 7, center_color, -1)
 
-                # ESC для выхода
+                # небольшая диагностика
+                txt = f"Visited: {len(visited)}"
+                cv2.putText(frame, txt, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+                if last_target is not None:
+                    cv2.putText(frame, f"Target: {last_target}", (10, 55),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
                 cv2.imshow("aruco_nav", frame)
                 key = cv2.waitKey(1) & 0xFF
-                if key == 27:
+                if key == 27:  # ESC
                     print("[INFO] ESC pressed, exiting.")
                     break
 
