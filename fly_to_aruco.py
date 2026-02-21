@@ -128,7 +128,7 @@ if __name__ == "__main__":
     # =========================
     # НАСТРОЙКИ
     # =========================
-    TAKEOFF_HEIGHT = 1.5
+    TAKEOFF_HEIGHT = 1.0
 
     CENTER_TOL_PX = 40   # допуск по центру
     LOOP_DT = 0.05       # частота команд
@@ -229,7 +229,7 @@ if __name__ == "__main__":
                                 vy = SPEED * (dy / norm)
 
                             # vz и yaw всегда 0
-                            cmd.set_manual_speed_body_fixed(vx=vx, vy=vy, vz=0, yaw_rate=0)
+                            cmd.set_manual_speed_body_fixed(vx=vx, vy=-vy, vz=0, yaw_rate=0)
 
             # Отрисовка (точка центра и инфо)
             if SHOW_WINDOW:
