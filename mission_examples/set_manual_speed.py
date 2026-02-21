@@ -11,24 +11,25 @@ if __name__ == "__main__":
         time.sleep(1)                 # Ждем 1 секунду после взлета
 
         # Дрон летит вперед (по оси Y) в течение 2 секунд со скоростью 1 м/с
-        t = time.time()
-        while True:                                                      # Отправка команды set_manual_speed всегда осуществляется в бесконечном цикле
-            pioneer_mini.set_manual_speed(vx=0, vy=1, vz=0, yaw_rate=0)  # Устанавливаем скорость движения по оси y
-            time.sleep(0.05)                                             # Небольшая задержка
-            if time.time() - t > 2:                                      # Проверяем, прошло ли 2 секунды
-                break                                                    # Если прошло - выход из цикла
+        pioneer_mini.set_manual_speed(vx=0, vy=4, vz=0, yaw_rate=0)
+        # t = time.time()
+        # while True:                                                      # Отправка команды set_manual_speed всегда осуществляется в бесконечном цикле
+        #     pioneer_mini.set_manual_speed(vx=0, vy=4, vz=0, yaw_rate=0)  # Устанавливаем скорость движения по оси y
+        #     time.sleep(0.05)                                             # Небольшая задержка
+        #     if time.time() - t > :                                      # Проверяем, прошло ли 2 секунды
+        #         break                                                    # Если прошло - выход из цикла
 
         time.sleep(2)                                                    # Ждем 2 секунды перед следующим движением
 
         # Дрон летит вправо (по оси X) в течение 2 секунд со скоростью 1 м/с
-        t = time.time()                                                  # Запоминаем текущее время
-        while True:
-            pioneer_mini.set_manual_speed(vx=1, vy=0, vz=0, yaw_rate=0)  # Устанавливаем скорость движения по оси x
-            time.sleep(0.05)
-            if time.time() - t > 2:
-                break
-
-        time.sleep(2)                                                    # Ждем 2 секунды перед посадкой
+        # t = time.time()                                                  # Запоминаем текущее время
+        # while True:
+        #     pioneer_mini.set_manual_speed(vx=1, vy=0, vz=0, yaw_rate=0)  # Устанавливаем скорость движения по оси x
+        #     time.sleep(0.05)
+        #     if time.time() - t > 2:
+        #         break
+        #
+        # time.sleep(2)                                                    # Ждем 2 секунды перед посадкой
 
         pioneer_mini.land()                                              # Осуществляем посадку
 

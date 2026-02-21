@@ -48,6 +48,10 @@ if __name__ == "__main__":
                 time.sleep(1)
                 pioneer_mini.takeoff()
                 time.sleep(2)
+                # pioneer_mini.go_to_local_point_body_fixed(-1, 0, 0, 0, )
+                # while not pioneer_mini.point_reached():
+                #     time.sleep(0.1)
+                # pioneer_mini.go_to_local_point_body_fixed(0, 1, 0, 0, )
             elif key == ord("4"):
                 time.sleep(2)
                 pioneer_mini.land()
