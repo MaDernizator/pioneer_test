@@ -140,7 +140,7 @@ if __name__ == "__main__":
     CMD_HZ = 10.0
     CMD_DT = 1.0 / CMD_HZ
 
-    # Частота цикла (может быть выше, чем CMD_HZ — команды будут rate-limit’иться)
+    # Частота цикла отрисовки/логики (может быть выше)
     LOOP_DT = 0.01
 
     SPEED = 0.25  # м/с, модуль скорости в плоскости XY
@@ -163,12 +163,10 @@ if __name__ == "__main__":
 
     # Для ограничения частоты команд
     next_cmd_time = time.monotonic()
+
+    # “Текущие” желаемые команды (их шлём не чаще 10 Гц)
     pending_vx, pending_vy = 0.0, 0.0
     pending_color = RED
-
-    def set_pending(vx: float, vy: float, color):
-        nonlocal pending_vx, pending_vy, pending_color
-        pending_vx, pending_vy, pending_color = vx, vy, color
 
     try:
         if not CONNECT_ONLY:
@@ -191,18 +189,23 @@ if __name__ == "__main__":
             cx0, cy0 = int(w / 2), int(h / 2)
 
             # По умолчанию хотим стоять
-            set_pending(0.0, 0.0, RED)
+            pending_vx, pending_vy = 0.0, 0.0
+            pending_color = RED
 
-            # Логика “паузы 3с”: зелёная точка + нулевые скорости
+            # Пауза 3 сек — держим зелёную точку и нулевую команду
             if time.time() < hold_green_until:
-                set_pending(0.0, 0.0, GREEN)
+                pending_color = GREEN
+                pending_vx, pending_vy = 0.0, 0.0
             else:
                 if not markers:
-                    set_pending(0.0, 0.0, RED)
+                    pending_vx, pending_vy = 0.0, 0.0
+                    pending_color = RED
                 else:
                     target_id = choose_next_marker(markers, visited)
+
                     if target_id is None:
-                        set_pending(0.0, 0.0, RED)
+                        pending_vx, pending_vy = 0.0, 0.0
+                        pending_color = RED
                     else:
                         if target_id != last_target:
                             print(f"[INFO] New target marker: {target_id}")
@@ -216,32 +219,32 @@ if __name__ == "__main__":
                         centered = (abs(dx_px) <= CENTER_TOL_PX and abs(dy_px) <= CENTER_TOL_PX)
 
                         if centered and (target_id not in visited):
-                            # попали в центр — останов, отметить посещение, 3 секунды зелёный
                             visited.add(target_id)
                             print(f"[INFO] Marker {target_id} centered. Visited: {sorted(list(visited))}")
                             hold_green_until = time.time() + 3.0
-                            set_pending(0.0, 0.0, GREEN)
+
+                            pending_color = GREEN
+                            pending_vx, pending_vy = 0.0, 0.0
                         else:
-                            # считаем направление (vx, vy), |v| = SPEED
-                            dx = dx_px / (w / 2.0)   # [-1..1]
-                            dy = dy_px / (h / 2.0)   # [-1..1]
+                            dx = dx_px / (w / 2.0)
+                            dy = dy_px / (h / 2.0)
 
                             norm = (dx * dx + dy * dy) ** 0.5
                             if norm < 1e-6:
-                                vx, vy = 0.0, 0.0
+                                pending_vx, pending_vy = 0.0, 0.0
                             else:
-                                vx = SPEED * (dx / norm)
-                                vy = SPEED * (dy / norm)
+                                pending_vx = SPEED * (dx / norm)
+                                pending_vy = SPEED * (dy / norm)
 
-                            # Если тебе реально нужна инверсия по Y — верни минус здесь:
-                            # vy = -vy
+                            # Если тебе на практике нужна инверсия по Y — включи:
+                            # pending_vy = -pending_vy
 
-                            set_pending(vx, vy, RED)
+                            pending_color = RED
 
             # --- Отправка команд строго 10 Гц ---
             now = time.monotonic()
             if now >= next_cmd_time:
-                cmd.set_manual_speed_body_fixed(vx=pending_vx, vy=-pending_vy, vz=0, yaw_rate=0)
+                cmd.set_manual_speed_body_fixed(vx=pending_vx, vy=pending_vy, vz=0, yaw_rate=0)
                 next_cmd_time = now + CMD_DT
 
             # Отрисовка
