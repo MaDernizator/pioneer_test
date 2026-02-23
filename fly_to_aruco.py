@@ -113,7 +113,6 @@ class DroneCommander:
             time.sleep(0.1)
 
     def set_manual_speed_body_fixed(self, vx: float, vy: float, vz: float, yaw_rate: float):
-        # В connect-only режиме КОМАНДЫ всё равно отправляем
         self.p.set_manual_speed_body_fixed(vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate)
 
     def land_and_close(self):
@@ -136,7 +135,13 @@ if __name__ == "__main__":
     TAKEOFF_HEIGHT = 1.0
 
     CENTER_TOL_PX = 40
-    LOOP_DT = 0.05
+
+    # Частота отправки команд (10 Гц)
+    CMD_HZ = 10.0
+    CMD_DT = 1.0 / CMD_HZ
+
+    # Частота цикла (может быть выше, чем CMD_HZ — команды будут rate-limit’иться)
+    LOOP_DT = 0.01
 
     SPEED = 0.25  # м/с, модуль скорости в плоскости XY
 
@@ -155,6 +160,15 @@ if __name__ == "__main__":
     last_target: Optional[int] = None
 
     hold_green_until = 0.0
+
+    # Для ограничения частоты команд
+    next_cmd_time = time.monotonic()
+    pending_vx, pending_vy = 0.0, 0.0
+    pending_color = RED
+
+    def set_pending(vx: float, vy: float, color):
+        nonlocal pending_vx, pending_vy, pending_color
+        pending_vx, pending_vy, pending_color = vx, vy, color
 
     try:
         if not CONNECT_ONLY:
@@ -176,19 +190,19 @@ if __name__ == "__main__":
             h, w = frame.shape[:2]
             cx0, cy0 = int(w / 2), int(h / 2)
 
-            center_color = RED
+            # По умолчанию хотим стоять
+            set_pending(0.0, 0.0, RED)
 
+            # Логика “паузы 3с”: зелёная точка + нулевые скорости
             if time.time() < hold_green_until:
-                center_color = GREEN
-                cmd.set_manual_speed_body_fixed(0, 0, 0, 0)
+                set_pending(0.0, 0.0, GREEN)
             else:
                 if not markers:
-                    cmd.set_manual_speed_body_fixed(0, 0, 0, 0)
+                    set_pending(0.0, 0.0, RED)
                 else:
                     target_id = choose_next_marker(markers, visited)
-
                     if target_id is None:
-                        cmd.set_manual_speed_body_fixed(0, 0, 0, 0)
+                        set_pending(0.0, 0.0, RED)
                     else:
                         if target_id != last_target:
                             print(f"[INFO] New target marker: {target_id}")
@@ -202,30 +216,37 @@ if __name__ == "__main__":
                         centered = (abs(dx_px) <= CENTER_TOL_PX and abs(dy_px) <= CENTER_TOL_PX)
 
                         if centered and (target_id not in visited):
-                            center_color = GREEN
-                            cmd.set_manual_speed_body_fixed(0, 0, 0, 0)
-
+                            # попали в центр — останов, отметить посещение, 3 секунды зелёный
                             visited.add(target_id)
                             print(f"[INFO] Marker {target_id} centered. Visited: {sorted(list(visited))}")
                             hold_green_until = time.time() + 3.0
+                            set_pending(0.0, 0.0, GREEN)
                         else:
+                            # считаем направление (vx, vy), |v| = SPEED
                             dx = dx_px / (w / 2.0)   # [-1..1]
                             dy = dy_px / (h / 2.0)   # [-1..1]
 
                             norm = (dx * dx + dy * dy) ** 0.5
-
                             if norm < 1e-6:
-                                vx = 0.0
-                                vy = 0.0
+                                vx, vy = 0.0, 0.0
                             else:
                                 vx = SPEED * (dx / norm)
                                 vy = SPEED * (dy / norm)
 
-                            # vz и yaw всегда 0
-                            cmd.set_manual_speed_body_fixed(vx=vx, vy=-vy, vz=0, yaw_rate=0)
+                            # Если тебе реально нужна инверсия по Y — верни минус здесь:
+                            # vy = -vy
 
+                            set_pending(vx, vy, RED)
+
+            # --- Отправка команд строго 10 Гц ---
+            now = time.monotonic()
+            if now >= next_cmd_time:
+                cmd.set_manual_speed_body_fixed(vx=pending_vx, vy=-pending_vy, vz=0, yaw_rate=0)
+                next_cmd_time = now + CMD_DT
+
+            # Отрисовка
             if SHOW_WINDOW:
-                cv2.circle(frame, (cx0, cy0), 7, center_color, -1)
+                cv2.circle(frame, (cx0, cy0), 7, pending_color, -1)
 
                 txt = f"Visited: {len(visited)}"
                 cv2.putText(frame, txt, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
