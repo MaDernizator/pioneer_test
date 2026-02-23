@@ -85,17 +85,25 @@ def choose_next_marker(markers: Dict[int, MarkerInfo], visited: Set[int]) -> Opt
 
 
 class DroneCommander:
-    def __init__(self, dry_run: bool):
-        self.dry_run = dry_run
-        self.p = None
-        if not dry_run:
-            if Pioneer is None:
-                raise RuntimeError("pioneer_sdk недоступен, но DRY_RUN=False")
-            self.p = Pioneer()
+    """
+    CONNECT_ONLY=True:
+      - подключаемся к дрону
+      - шлём set_manual_speed_body_fixed
+      - но НЕ делаем arm/takeoff/land
+    CONNECT_ONLY=False:
+      - обычный режим (arm/takeoff/land)
+    """
+    def __init__(self, connect_only: bool):
+        self.connect_only = connect_only
+
+        if Pioneer is None:
+            raise RuntimeError("pioneer_sdk недоступен")
+
+        self.p = Pioneer()
 
     def arm_takeoff_to_height(self, z: float):
-        if self.dry_run:
-            print(f"[DRY] arm(), takeoff(), go_to_local_point(z={z})")
+        if self.connect_only:
+            print(f"[CONNECT_ONLY] Skip arm/takeoff/go_to_local_point(z={z})")
             return
 
         self.p.arm()
@@ -105,16 +113,13 @@ class DroneCommander:
             time.sleep(0.1)
 
     def set_manual_speed_body_fixed(self, vx: float, vy: float, vz: float, yaw_rate: float):
-        if self.dry_run:
-            print(f"[DRY] set_manual_speed_body_fixed(vx={vx:.3f}, vy={vy:.3f}, vz={vz:.3f}, yaw_rate={yaw_rate:.3f})")
-            return
+        # В connect-only режиме КОМАНДЫ всё равно отправляем
         self.p.set_manual_speed_body_fixed(vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate)
 
     def land_and_close(self):
-        if self.dry_run:
-            print("[DRY] land(), close_connection()")
-            return
-        self.p.land()
+        if not self.connect_only:
+            self.p.land()
+
         self.p.close_connection()
         del self.p
 
@@ -123,17 +128,17 @@ if __name__ == "__main__":
     # =========================
     # РЕЖИМЫ
     # =========================
-    DRY_RUN = True   # True: безполётный режим (не шлём команды)
+    CONNECT_ONLY = True  # True: не arm/takeoff/land, но set_manual_speed отправляем
 
     # =========================
     # НАСТРОЙКИ
     # =========================
     TAKEOFF_HEIGHT = 1.0
 
-    CENTER_TOL_PX = 40   # допуск по центру
-    LOOP_DT = 0.05       # частота команд
+    CENTER_TOL_PX = 40
+    LOOP_DT = 0.05
 
-    SPEED = 0.25          # м/с, модуль скорости в плоскости XY (регулируемая константа)
+    SPEED = 0.25  # м/с, модуль скорости в плоскости XY
 
     SHOW_WINDOW = True
 
@@ -144,21 +149,20 @@ if __name__ == "__main__":
     tracker = ArucoTrackerThread()
     tracker.start()
 
-    cmd = DroneCommander(dry_run=DRY_RUN)
+    cmd = DroneCommander(connect_only=CONNECT_ONLY)
 
     visited: Set[int] = set()
     last_target: Optional[int] = None
 
-    # держать зелёную точку 3 секунды после “попадания”
     hold_green_until = 0.0
 
     try:
-        if not DRY_RUN:
+        if not CONNECT_ONLY:
             print("[INFO] Real flight mode")
             cmd.arm_takeoff_to_height(TAKEOFF_HEIGHT)
             print(f"[INFO] Hover reached: z={TAKEOFF_HEIGHT:.2f}m")
         else:
-            print("[INFO] DRY_RUN enabled: no arming/takeoff, no commands sent.")
+            print("[INFO] CONNECT_ONLY: no arm/takeoff/land, but manual speed commands are sent.")
 
         while True:
             with tracker.lock:
@@ -172,21 +176,17 @@ if __name__ == "__main__":
             h, w = frame.shape[:2]
             cx0, cy0 = int(w / 2), int(h / 2)
 
-            # По умолчанию точка красная
             center_color = RED
 
-            # Если идёт “зелёная пауза 3с” — точка зелёная и команд нет
             if time.time() < hold_green_until:
                 center_color = GREEN
                 cmd.set_manual_speed_body_fixed(0, 0, 0, 0)
             else:
-                # Нет маркеров — стоим
                 if not markers:
                     cmd.set_manual_speed_body_fixed(0, 0, 0, 0)
                 else:
                     target_id = choose_next_marker(markers, visited)
 
-                    # Все видимые посещены — стоим
                     if target_id is None:
                         cmd.set_manual_speed_body_fixed(0, 0, 0, 0)
                     else:
@@ -196,27 +196,21 @@ if __name__ == "__main__":
 
                         mi = markers[target_id]
 
-                        # Ошибки в пикселях относительно центра кадра
-                        dx_px = mi.cx - cx0   # + если маркер правее
-                        dy_px = mi.cy - cy0   # + если маркер ниже
+                        dx_px = mi.cx - cx0
+                        dy_px = mi.cy - cy0
 
                         centered = (abs(dx_px) <= CENTER_TOL_PX and abs(dy_px) <= CENTER_TOL_PX)
 
                         if centered and (target_id not in visited):
-                            # Над маркером -> зелёная точка
                             center_color = GREEN
-
-                            # Останов + отметить посещение + 3 секунды зелёный режим
                             cmd.set_manual_speed_body_fixed(0, 0, 0, 0)
+
                             visited.add(target_id)
                             print(f"[INFO] Marker {target_id} centered. Visited: {sorted(list(visited))}")
                             hold_green_until = time.time() + 3.0
                         else:
-                            # Нужно смещаться -> красная точка (по умолчанию)
-                            # Вектор направления в XY:
-                            # x вправо, y вперёд (как ты указал, совпадает для камеры и дрона)
-                            dx = dx_px / (w / 2.0)   # примерно [-1..1]
-                            dy = dy_px / (h / 2.0)   # примерно [-1..1]
+                            dx = dx_px / (w / 2.0)   # [-1..1]
+                            dy = dy_px / (h / 2.0)   # [-1..1]
 
                             norm = (dx * dx + dy * dy) ** 0.5
 
@@ -224,18 +218,15 @@ if __name__ == "__main__":
                                 vx = 0.0
                                 vy = 0.0
                             else:
-                                # Нормируем направление и задаём модуль SPEED
                                 vx = SPEED * (dx / norm)
                                 vy = SPEED * (dy / norm)
 
                             # vz и yaw всегда 0
                             cmd.set_manual_speed_body_fixed(vx=vx, vy=-vy, vz=0, yaw_rate=0)
 
-            # Отрисовка (точка центра и инфо)
             if SHOW_WINDOW:
                 cv2.circle(frame, (cx0, cy0), 7, center_color, -1)
 
-                # небольшая диагностика
                 txt = f"Visited: {len(visited)}"
                 cv2.putText(frame, txt, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
@@ -245,7 +236,7 @@ if __name__ == "__main__":
 
                 cv2.imshow("aruco_nav", frame)
                 key = cv2.waitKey(1) & 0xFF
-                if key == 27:  # ESC
+                if key == 27:
                     print("[INFO] ESC pressed, exiting.")
                     break
 
@@ -259,5 +250,4 @@ if __name__ == "__main__":
         if SHOW_WINDOW:
             cv2.destroyAllWindows()
 
-        if not DRY_RUN:
-            cmd.land_and_close()
+        cmd.land_and_close()
