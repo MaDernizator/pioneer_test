@@ -11,8 +11,7 @@ except Exception:
     Pioneer = None
     Camera = None
 
-# Функция должна лежать в отдельном файле, например pixel_projector.py
-from pixel_projector import pixel_to_drone_xy_mtx
+from pixel_projector import pixel_to_drone_xy  # <-- единая функция
 
 
 @dataclass
@@ -109,7 +108,6 @@ class DroneCommander:
             time.sleep(0.1)
 
     def go_to_local_point(self, x: float, y: float, z: float, yaw: float = 0.0):
-        # yaw игнорируем и всегда считаем 0
         if self.dry_run:
             print(f"[DRY] go_to_local_point(x={x:+.2f}, y={y:+.2f}, z={z:+.2f}, yaw=0.00)")
             return
@@ -222,7 +220,7 @@ class NavigatorThread(threading.Thread):
 
 
 if __name__ == "__main__":
-    DRY_RUN = False  # True: без arm/takeoff/land и go_to только печать
+    DRY_RUN = True  # True: без arm/takeoff/land и go_to только печать
 
     TAKEOFF_HEIGHT = 1.0
     CENTER_TOL_PX = 40
@@ -231,11 +229,9 @@ if __name__ == "__main__":
 
     MARKER_HOLD_TIME = 3.0
 
-    # Навигатор
     REACH_TIMEOUT = 15.0
     REACH_POLL_DT = 0.1
 
-    # Чтобы не спамить submit_goal_if_idle при каждом кадре
     GOAL_TRY_HZ = 5.0
     GOAL_TRY_DT = 1.0 / GOAL_TRY_HZ
     next_goal_try_t = time.monotonic()
@@ -284,16 +280,13 @@ if __name__ == "__main__":
 
             nav_state = nav.get_state()
 
-            # Если навигатор завершил движение — снимаем locked_goal
             if locked_goal is not None and nav_state in ("REACHED", "TIMEOUT"):
                 locked_goal = None
 
-            # Пауза “над маркером”
             if time.time() < hold_until:
                 center_color = GREEN
                 current_state = "HOVERING"
             else:
-                # Если летим к залоченной цели — ничего не обновляем
                 if locked_goal is not None and nav_state == "MOVING":
                     current_state = "FLYING_LOCKED"
                     center_color = RED
@@ -317,7 +310,8 @@ if __name__ == "__main__":
                             dy_px = mi.cy - cy0
                             centered_px = (abs(dx_px) <= CENTER_TOL_PX and abs(dy_px) <= CENTER_TOL_PX)
 
-                            dx_m, dy_m = pixel_to_drone_xy_mtx(u=mi.cx, v=mi.cy, drone_alt_m=drone_alt)
+                            # ---- КЛЮЧЕВОЕ: координаты маркера (dx,dy) в метрах относительно центра дрона ----
+                            dx_m, dy_m = pixel_to_drone_xy(mi.cx, mi.cy, drone_alt)
                             centered_m = (abs(dx_m) <= CENTER_TOL_M and abs(dy_m) <= CENTER_TOL_M)
 
                             if centered_px and centered_m and target_id not in visited:
@@ -330,7 +324,6 @@ if __name__ == "__main__":
                                 current_state = "FLYING"
                                 center_color = RED
 
-                                # Фиксируем цель один раз и больше не меняем до point_reached
                                 target_x = drone_x + dx_m
                                 target_y = drone_y + dy_m
                                 goal = (target_x, target_y, TAKEOFF_HEIGHT)
@@ -342,7 +335,6 @@ if __name__ == "__main__":
                                         locked_goal = goal
                                     next_goal_try_t = now + GOAL_TRY_DT
 
-            # Отрисовка
             if SHOW_WINDOW:
                 cv2.circle(frame, (cx0, cy0), 7, center_color, -1)
 
@@ -361,10 +353,9 @@ if __name__ == "__main__":
                     cv2.putText(frame, f"Locked goal: ({gx:+.2f},{gy:+.2f}) z={gz:.2f} yaw=0",
                                 (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
-                # Debug dx/dy до текущей цели, если видна
                 if last_target is not None and last_target in markers:
                     mi = markers[last_target]
-                    dx_m, dy_m = pixel_to_drone_xy_mtx(u=mi.cx, v=mi.cy, drone_alt_m=drone_alt)
+                    dx_m, dy_m = pixel_to_drone_xy(mi.cx, mi.cy, drone_alt)
                     cv2.putText(frame, f"Marker rel: dx={dx_m:+.2f} dy={dy_m:+.2f}",
                                 (10, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 

@@ -32,12 +32,28 @@ class ArucoTrackerThread(threading.Thread):
         self.aruco_params = cv2.aruco.DetectorParameters()
         self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
 
+        # Пауза камеры (чтобы не мешать взлёту)
+        self._pause_lock = threading.Lock()
+        self._paused = False
+
+    def set_paused(self, paused: bool):
+        with self._pause_lock:
+            self._paused = paused
+
+    def is_paused(self) -> bool:
+        with self._pause_lock:
+            return self._paused
+
     def run(self):
         if self.camera is None:
             print("[ERROR] Camera is unavailable (pioneer_sdk import failed).")
             return
 
         while self.running:
+            if self.is_paused():
+                time.sleep(0.02)
+                continue
+
             try:
                 frame = self.camera.get_cv_frame()
 
@@ -85,27 +101,28 @@ def choose_next_marker(markers: Dict[int, MarkerInfo], visited: Set[int]) -> Opt
 
 
 class DroneCommander:
-    """
-    CONNECT_ONLY=True:
-      - подключаемся к дрону
-      - шлём set_manual_speed_body_fixed
-      - но НЕ делаем arm/takeoff/land
-    CONNECT_ONLY=False:
-      - обычный режим (arm/takeoff/land)
-    """
     def __init__(self, connect_only: bool):
         self.connect_only = connect_only
         if Pioneer is None:
             raise RuntimeError("pioneer_sdk недоступен")
         self.p = Pioneer()
 
-    def arm_takeoff_to_height(self, z: float):
+    def arm_takeoff_to_height(self, z: float,
+                              arm_to_takeoff_delay: float,
+                              takeoff_to_goto_delay: float):
+        """
+        Встроили задержки между командами.
+        """
         if self.connect_only:
             print(f"[CONNECT_ONLY] Skip arm/takeoff/go_to_local_point(z={z})")
             return
 
         self.p.arm()
+        time.sleep(arm_to_takeoff_delay)
+
         self.p.takeoff()
+        time.sleep(takeoff_to_goto_delay)
+
         self.p.go_to_local_point(x=0, y=0, z=z, yaw=0)
         while not self.p.point_reached():
             time.sleep(0.1)
@@ -121,11 +138,6 @@ class DroneCommander:
 
 
 class CommandSenderThread(threading.Thread):
-    """
-    Отдельный поток отправки команд.
-    Добавлен "ARMING_LOCK": можно временно запретить отправку любых manual_speed
-    (например, на время взлёта/набора высоты).
-    """
     def __init__(self, cmd: DroneCommander, hz: float):
         super().__init__(daemon=True)
         self.cmd = cmd
@@ -138,11 +150,9 @@ class CommandSenderThread(threading.Thread):
         self.vz = 0.0
         self.yaw_rate = 0.0
 
-        # Блокировка отправки (на время взлёта/набора высоты)
         self.send_enabled = True
         self.enable_lock = threading.Lock()
 
-        # статистика
         self._t_last_print = time.monotonic()
         self._last_send_ms = 0.0
         self._max_send_ms = 0.0
@@ -167,7 +177,6 @@ class CommandSenderThread(threading.Thread):
             with self.enable_lock:
                 enabled = self.send_enabled
             if not enabled:
-                # Ничего не отправляем, вообще (важно для взлёта)
                 continue
 
             with self.lock:
@@ -194,16 +203,18 @@ class CommandSenderThread(threading.Thread):
 
 
 if __name__ == "__main__":
-    CONNECT_ONLY = True  # не arm/takeoff/land, но команды шлём
+    CONNECT_ONLY = True  # если False — реальный взлёт
 
     TAKEOFF_HEIGHT = 1.0
     CENTER_TOL_PX = 40
     SPEED = 0.25
-
     CMD_HZ = 10.0
 
-    # После команды takeoff + набора высоты держим "тишину" (без manual_speed)
-    POST_TAKEOFF_SILENCE_SEC = 4.0
+    # КЛЮЧЕВОЕ: “тишина” вокруг взлёта
+    ARM_TO_TAKEOFF_DELAY_SEC = 1.0       # пауза после arm() перед takeoff()
+    TAKEOFF_TO_GOTO_DELAY_SEC = 2.0      # пауза после takeoff() перед go_to_local_point()
+    POST_TAKEOFF_SILENCE_SEC = 4.0       # после достижения высоты ещё 4 секунды без manual_speed
+    PAUSE_CAMERA_DURING_TAKEOFF = True   # вот это часто решает проблему “сносит на взлёте”
 
     SHOW_WINDOW = True
     RED = (0, 0, 255)
@@ -219,25 +230,39 @@ if __name__ == "__main__":
     visited: Set[int] = set()
     last_target: Optional[int] = None
     hold_green_until = 0.0
-
     pending_color = RED
 
     try:
         if not CONNECT_ONLY:
-            print("[INFO] Real flight mode")
+            print("[INFO] Real flight mode (takeoff)")
 
-            # На время взлёта/набора высоты полностью запрещаем любые manual_speed
+            # 1) Запретить manual_speed
             sender.set_target(0.0, 0.0, 0.0, 0.0)
             sender.set_send_enabled(False)
 
-            cmd.arm_takeoff_to_height(TAKEOFF_HEIGHT)
+            # 2) (Опционально) Поставить камеру на паузу
+            if PAUSE_CAMERA_DURING_TAKEOFF:
+                tracker.set_paused(True)
+                print("[INFO] Camera paused during takeoff sequence.")
+
+            # 3) Взлёт и набор высоты + задержки между командами
+            cmd.arm_takeoff_to_height(
+                TAKEOFF_HEIGHT,
+                arm_to_takeoff_delay=ARM_TO_TAKEOFF_DELAY_SEC,
+                takeoff_to_goto_delay=TAKEOFF_TO_GOTO_DELAY_SEC
+            )
             print(f"[INFO] Hover reached: z={TAKEOFF_HEIGHT:.2f}m")
 
-            # После достижения точки высоты — ещё 4 секунды тишины
+            # 4) Ещё 4 секунды тишины (без manual_speed)
             print(f"[INFO] Post-takeoff silence: {POST_TAKEOFF_SILENCE_SEC:.1f}s (no manual_speed)")
             time.sleep(POST_TAKEOFF_SILENCE_SEC)
 
-            # Разрешаем manual_speed после полной стабилизации
+            # 5) Возобновить камеру
+            if PAUSE_CAMERA_DURING_TAKEOFF:
+                tracker.set_paused(False)
+                print("[INFO] Camera resumed.")
+
+            # 6) Разрешить manual_speed
             sender.set_send_enabled(True)
             print("[INFO] Manual speed enabled.")
         else:
@@ -293,12 +318,9 @@ if __name__ == "__main__":
                             else:
                                 vx = SPEED * (dx / norm)
                                 vy = SPEED * (dy / norm)
-
                             # если нужна инверсия Y — раскомментируй
                             # vy = -vy
 
-            # В обычном режиме отправка уже разрешена после взлёта.
-            # В CONNECT_ONLY режиме отправка разрешена сразу.
             sender.set_target(vx=vx, vy=vy, vz=0.0, yaw_rate=0.0)
 
             if SHOW_WINDOW:
