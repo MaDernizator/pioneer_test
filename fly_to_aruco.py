@@ -106,6 +106,7 @@ class DroneCommander:
 
         self.p.arm()
         self.p.takeoff()
+        time.sleep(2)
         self.p.go_to_local_point(x=0, y=0, z=z, yaw=0)
         while not self.p.point_reached():
             time.sleep(0.1)
@@ -194,7 +195,7 @@ class CommandSenderThread(threading.Thread):
 
 
 if __name__ == "__main__":
-    CONNECT_ONLY = True  # не arm/takeoff/land, но команды шлём
+    CONNECT_ONLY = False  # не arm/takeoff/land, но команды шлём
 
     TAKEOFF_HEIGHT = 1.0
     CENTER_TOL_PX = 40
@@ -231,6 +232,7 @@ if __name__ == "__main__":
             sender.set_send_enabled(False)
 
             cmd.arm_takeoff_to_height(TAKEOFF_HEIGHT)
+            time.sleep(2)
             print(f"[INFO] Hover reached: z={TAKEOFF_HEIGHT:.2f}m")
 
             # После достижения точки высоты — ещё 4 секунды тишины

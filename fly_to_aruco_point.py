@@ -12,7 +12,7 @@ except Exception:
     Camera = None
 
 # Функция должна лежать в отдельном файле, например pixel_projector.py
-from pixel_projector import pixel_to_drone_xy_mtx
+from pixel_to_lps import pixel_to_drone_xy_mtx
 
 
 @dataclass
@@ -104,6 +104,7 @@ class DroneCommander:
             return
         self.p.arm()
         self.p.takeoff()
+        time.sleep(3)
         self.p.go_to_local_point(x=0, y=0, z=z, yaw=0)
         while not self.p.point_reached():
             time.sleep(0.1)
@@ -123,11 +124,11 @@ class DroneCommander:
     def get_pos_lps_xy(self) -> Tuple[float, float]:
         if self.dry_run:
             try:
-                pos = self.p.get_pos_lps()
+                pos = self.p.get_local_position_lps(get_last_received=True)
                 return float(pos[0]), float(pos[1])
             except Exception:
                 return 0.0, 0.0
-        pos = self.p.get_pos_lps()
+        pos = self.p.get_local_position_lps(get_last_received=True)
         return float(pos[0]), float(pos[1])
 
     def get_alt_m(self) -> float:

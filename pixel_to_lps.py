@@ -36,8 +36,6 @@ def pixel_to_drone_xy_mtx(
     u: float,
     v: float,
     drone_alt_m: float,       # высота камеры над землей (м)
-    mtx: np.ndarray,
-    dist: np.ndarray,
     cam_offset_x: float = 0.0,      # м, камера смещена вправо (+X)
     cam_offset_y: float = 0.075,    # м, камера смещена вперед (+Y)
     img_y_to_forward: float = -1.0  # +1: вниз кадра = вперед, -1: вниз кадра = назад
