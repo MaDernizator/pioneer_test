@@ -123,7 +123,8 @@ class DroneCommander:
 class CommandSenderThread(threading.Thread):
     """
     Отдельный поток отправки команд.
-    Даже если send блокируется, камера/GUI не замирают.
+    Добавлен "ARMING_LOCK": можно временно запретить отправку любых manual_speed
+    (например, на время взлёта/набора высоты).
     """
     def __init__(self, cmd: DroneCommander, hz: float):
         super().__init__(daemon=True)
@@ -137,10 +138,18 @@ class CommandSenderThread(threading.Thread):
         self.vz = 0.0
         self.yaw_rate = 0.0
 
+        # Блокировка отправки (на время взлёта/набора высоты)
+        self.send_enabled = True
+        self.enable_lock = threading.Lock()
+
         # статистика
         self._t_last_print = time.monotonic()
         self._last_send_ms = 0.0
         self._max_send_ms = 0.0
+
+    def set_send_enabled(self, enabled: bool):
+        with self.enable_lock:
+            self.send_enabled = enabled
 
     def set_target(self, vx: float, vy: float, vz: float, yaw_rate: float):
         with self.lock:
@@ -154,6 +163,12 @@ class CommandSenderThread(threading.Thread):
                 time.sleep(min(0.002, next_t - now))
                 continue
             next_t = now + self.dt
+
+            with self.enable_lock:
+                enabled = self.send_enabled
+            if not enabled:
+                # Ничего не отправляем, вообще (важно для взлёта)
+                continue
 
             with self.lock:
                 vx, vy, vz, yaw_rate = self.vx, self.vy, self.vz, self.yaw_rate
@@ -170,7 +185,6 @@ class CommandSenderThread(threading.Thread):
             if send_ms > self._max_send_ms:
                 self._max_send_ms = send_ms
 
-            # печать раз в 1 сек
             if t1 - self._t_last_print > 1.0:
                 print(f"[CMD] send: last={self._last_send_ms:.1f} ms, max={self._max_send_ms:.1f} ms")
                 self._t_last_print = t1
@@ -186,8 +200,10 @@ if __name__ == "__main__":
     CENTER_TOL_PX = 40
     SPEED = 0.25
 
-    # частота отправки команд (можешь хоть 2 Гц — лаг при блокирующем send всё равно будет, но теперь не “убьёт” камеру)
     CMD_HZ = 10.0
+
+    # После команды takeoff + набора высоты держим "тишину" (без manual_speed)
+    POST_TAKEOFF_SILENCE_SEC = 4.0
 
     SHOW_WINDOW = True
     RED = (0, 0, 255)
@@ -209,8 +225,21 @@ if __name__ == "__main__":
     try:
         if not CONNECT_ONLY:
             print("[INFO] Real flight mode")
+
+            # На время взлёта/набора высоты полностью запрещаем любые manual_speed
+            sender.set_target(0.0, 0.0, 0.0, 0.0)
+            sender.set_send_enabled(False)
+
             cmd.arm_takeoff_to_height(TAKEOFF_HEIGHT)
             print(f"[INFO] Hover reached: z={TAKEOFF_HEIGHT:.2f}m")
+
+            # После достижения точки высоты — ещё 4 секунды тишины
+            print(f"[INFO] Post-takeoff silence: {POST_TAKEOFF_SILENCE_SEC:.1f}s (no manual_speed)")
+            time.sleep(POST_TAKEOFF_SILENCE_SEC)
+
+            # Разрешаем manual_speed после полной стабилизации
+            sender.set_send_enabled(True)
+            print("[INFO] Manual speed enabled.")
         else:
             print("[INFO] CONNECT_ONLY: no arm/takeoff/land, but manual speed commands are sent.")
 
@@ -268,7 +297,8 @@ if __name__ == "__main__":
                             # если нужна инверсия Y — раскомментируй
                             # vy = -vy
 
-            # задаём “желательную” команду отправщику
+            # В обычном режиме отправка уже разрешена после взлёта.
+            # В CONNECT_ONLY режиме отправка разрешена сразу.
             sender.set_target(vx=vx, vy=vy, vz=0.0, yaw_rate=0.0)
 
             if SHOW_WINDOW:

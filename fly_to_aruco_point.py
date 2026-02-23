@@ -11,8 +11,7 @@ except Exception:
     Pioneer = None
     Camera = None
 
-# Функция должна лежать в отдельном файле (как ты просил), например pixel_projector.py
-# и внутри неё должны быть зашиты mtx/dist/offset'ы/знаки.
+# Функция должна лежать в отдельном файле, например pixel_projector.py
 from pixel_projector import pixel_to_drone_xy_mtx
 
 
@@ -88,7 +87,7 @@ class DroneCommander:
     """
     DRY_RUN=True:
       - НЕ arm/takeoff/land
-      - подключаемся (чтобы читать телеметрию/датчики)
+      - подключаемся (чтобы читать датчик высоты/позицию)
       - go_to_local_point только печатаем
     DRY_RUN=False:
       - обычный полёт
@@ -109,28 +108,27 @@ class DroneCommander:
         while not self.p.point_reached():
             time.sleep(0.1)
 
-    def go_to_local_point(self, x: float, y: float, z: float, yaw: float):
+    def go_to_local_point(self, x: float, y: float, z: float, yaw: float = 0.0):
+        # yaw игнорируем и всегда считаем 0
         if self.dry_run:
-            print(f"[DRY] go_to_local_point(x={x:+.2f}, y={y:+.2f}, z={z:+.2f}, yaw={yaw:+.2f})")
+            print(f"[DRY] go_to_local_point(x={x:+.2f}, y={y:+.2f}, z={z:+.2f}, yaw=0.00)")
             return
-        self.p.go_to_local_point(x=x, y=y, z=z, yaw=yaw)
+        self.p.go_to_local_point(x=x, y=y, z=z, yaw=0.0)
 
     def point_reached(self) -> bool:
         if self.dry_run:
             return False
         return self.p.point_reached()
 
-    def get_pos_lps_xy_yaw(self) -> Tuple[float, float, float]:
+    def get_pos_lps_xy(self) -> Tuple[float, float]:
         if self.dry_run:
             try:
                 pos = self.p.get_pos_lps()
-                yaw = self.p.get_yaw()
-                return float(pos[0]), float(pos[1]), float(yaw)
+                return float(pos[0]), float(pos[1])
             except Exception:
-                return 0.0, 0.0, 0.0
+                return 0.0, 0.0
         pos = self.p.get_pos_lps()
-        yaw = self.p.get_yaw()
-        return float(pos[0]), float(pos[1]), float(yaw)
+        return float(pos[0]), float(pos[1])
 
     def get_alt_m(self) -> float:
         # по примечанию: всегда в метрах
@@ -152,7 +150,8 @@ class NavigatorThread(threading.Thread):
       - принимает новую цель
       - отправляет go_to_local_point ровно 1 раз на цель
       - ждёт point_reached
-      - пока не достигнуто — игнорирует любые новые цели (как ты и просил)
+      - пока не достигнуто — игнорирует любые новые цели
+    yaw всегда 0
     """
     def __init__(self, cmd: DroneCommander, reach_timeout: float = 15.0, poll_dt: float = 0.1):
         super().__init__(daemon=True)
@@ -163,7 +162,7 @@ class NavigatorThread(threading.Thread):
         self._cv = threading.Condition()
         self._running = True
 
-        self._goal: Optional[Tuple[float, float, float, float]] = None
+        self._goal: Optional[Tuple[float, float, float]] = None  # x,y,z
         self._has_goal = False
 
         self._state = "IDLE"  # IDLE, MOVING, REACHED, TIMEOUT
@@ -177,19 +176,11 @@ class NavigatorThread(threading.Thread):
         with self._cv:
             return self._state
 
-    def is_busy(self) -> bool:
-        with self._cv:
-            return self._state == "MOVING"
-
-    def submit_goal_if_idle(self, x: float, y: float, z: float, yaw: float) -> bool:
-        """
-        Принять цель ТОЛЬКО если навигатор не занят.
-        Возвращает True если цель принята, иначе False.
-        """
+    def submit_goal_if_idle(self, x: float, y: float, z: float) -> bool:
         with self._cv:
             if self._state == "MOVING":
                 return False
-            self._goal = (x, y, z, yaw)
+            self._goal = (x, y, z)
             self._has_goal = True
             self._state = "IDLE"
             self._cv.notify()
@@ -207,9 +198,10 @@ class NavigatorThread(threading.Thread):
                 self._has_goal = False
                 self._state = "MOVING"
 
-            # 1) отправили команду на точку (1 раз)
+            # 1) отправляем команду (yaw=0)
             try:
-                self.cmd.go_to_local_point(*goal)
+                x, y, z = goal
+                self.cmd.go_to_local_point(x, y, z, yaw=0.0)
             except Exception as e:
                 print(f"[NAV] go_to_local_point error: {e}")
 
@@ -230,20 +222,13 @@ class NavigatorThread(threading.Thread):
 
 
 if __name__ == "__main__":
-    # =========================
-    # РЕЖИМЫ
-    # =========================
     DRY_RUN = False  # True: без arm/takeoff/land и go_to только печать
 
-    # =========================
-    # НАСТРОЙКИ
-    # =========================
     TAKEOFF_HEIGHT = 1.0
     CENTER_TOL_PX = 40
     CENTER_TOL_M = 0.15
     LOOP_DT = 0.02
 
-    YAW_ANGLE = 0.0
     MARKER_HOLD_TIME = 3.0
 
     # Навигатор
@@ -271,8 +256,7 @@ if __name__ == "__main__":
     hold_until = 0.0
     current_state = "SEARCH"
 
-    # “зафиксированная” цель на текущий полёт
-    locked_goal: Optional[Tuple[float, float, float, float]] = None  # x,y,z,yaw
+    locked_goal: Optional[Tuple[float, float, float]] = None  # x,y,z
 
     try:
         if not DRY_RUN:
@@ -295,26 +279,25 @@ if __name__ == "__main__":
             cx0, cy0 = int(w / 2), int(h / 2)
             center_color = RED
 
-            drone_x, drone_y, drone_yaw = cmd.get_pos_lps_xy_yaw()
+            drone_x, drone_y = cmd.get_pos_lps_xy()
             drone_alt = cmd.get_alt_m()
 
             nav_state = nav.get_state()
 
-            # Если навигатор завершил движение (REACHED или TIMEOUT) — снимаем locked_goal
+            # Если навигатор завершил движение — снимаем locked_goal
             if locked_goal is not None and nav_state in ("REACHED", "TIMEOUT"):
                 locked_goal = None
 
-            # Пауза “над маркером” (локальное удержание точки)
+            # Пауза “над маркером”
             if time.time() < hold_until:
                 center_color = GREEN
                 current_state = "HOVERING"
             else:
-                # Если цель уже залочена и навигатор MOVING — ничего не пересчитываем/не обновляем
+                # Если летим к залоченной цели — ничего не обновляем
                 if locked_goal is not None and nav_state == "MOVING":
                     current_state = "FLYING_LOCKED"
                     center_color = RED
                 else:
-                    # Иначе можно выбрать/зафиксировать новую цель
                     if not markers:
                         current_state = "SEARCH"
                         center_color = RED
@@ -347,10 +330,10 @@ if __name__ == "__main__":
                                 current_state = "FLYING"
                                 center_color = RED
 
-                                # Фиксируем цель (один раз) и больше её не меняем до point_reached
+                                # Фиксируем цель один раз и больше не меняем до point_reached
                                 target_x = drone_x + dx_m
                                 target_y = drone_y + dy_m
-                                goal = (target_x, target_y, TAKEOFF_HEIGHT, YAW_ANGLE)
+                                goal = (target_x, target_y, TAKEOFF_HEIGHT)
 
                                 now = time.monotonic()
                                 if now >= next_goal_try_t:
@@ -359,6 +342,7 @@ if __name__ == "__main__":
                                         locked_goal = goal
                                     next_goal_try_t = now + GOAL_TRY_DT
 
+            # Отрисовка
             if SHOW_WINDOW:
                 cv2.circle(frame, (cx0, cy0), 7, center_color, -1)
 
@@ -369,13 +353,20 @@ if __name__ == "__main__":
                     cv2.putText(frame, f"Target: {last_target}", (10, 50),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
-                cv2.putText(frame, f"Pos: ({drone_x:.2f}, {drone_y:.2f}) yaw={drone_yaw:+.2f} alt={drone_alt:.2f}m",
+                cv2.putText(frame, f"Pos: ({drone_x:.2f}, {drone_y:.2f}) alt={drone_alt:.2f}m yaw=0",
                             (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
                 if locked_goal is not None:
-                    gx, gy, gz, gyaw = locked_goal
-                    cv2.putText(frame, f"Locked goal: ({gx:+.2f},{gy:+.2f}) z={gz:.2f} yaw={gyaw:+.2f}",
+                    gx, gy, gz = locked_goal
+                    cv2.putText(frame, f"Locked goal: ({gx:+.2f},{gy:+.2f}) z={gz:.2f} yaw=0",
                                 (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+
+                # Debug dx/dy до текущей цели, если видна
+                if last_target is not None and last_target in markers:
+                    mi = markers[last_target]
+                    dx_m, dy_m = pixel_to_drone_xy_mtx(u=mi.cx, v=mi.cy, drone_alt_m=drone_alt)
+                    cv2.putText(frame, f"Marker rel: dx={dx_m:+.2f} dy={dy_m:+.2f}",
+                                (10, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
                 cv2.imshow("aruco_nav_go_to_point_locked", frame)
                 key = cv2.waitKey(1) & 0xFF
