@@ -1,7 +1,7 @@
 import time
 import threading
 from dataclasses import dataclass
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Tuple, List
 
 import cv2
 
@@ -95,11 +95,6 @@ class ArucoTrackerThread(threading.Thread):
         self.running = False
 
 
-def choose_next_marker(markers: Dict[int, MarkerInfo], visited: Set[int]) -> Optional[int]:
-    candidates = [mid for mid in markers.keys() if mid not in visited]
-    return min(candidates) if candidates else None
-
-
 class DroneCommander:
     def __init__(self, connect_only: bool):
         self.connect_only = connect_only
@@ -110,9 +105,6 @@ class DroneCommander:
     def arm_takeoff_to_height(self, z: float,
                               arm_to_takeoff_delay: float,
                               takeoff_to_goto_delay: float):
-        """
-        Встроили задержки между командами.
-        """
         if self.connect_only:
             print(f"[CONNECT_ONLY] Skip arm/takeoff/go_to_local_point(z={z})")
             return
@@ -202,6 +194,26 @@ class CommandSenderThread(threading.Thread):
         self.running = False
 
 
+def compute_speed_to_center(mi: MarkerInfo, cx0: int, cy0: int, w: int, h: int, speed: float) -> Tuple[float, float, int, int, bool]:
+    """
+    Возвращает (vx, vy, dx_px, dy_px, centered).
+    Оси: x вправо, y вперёд (как ты описывал). Инверсий не делаем.
+    """
+    dx_px = mi.cx - cx0
+    dy_px = mi.cy - cy0
+
+    dx = dx_px / (w / 2.0)
+    dy = dy_px / (h / 2.0)
+    norm = (dx * dx + dy * dy) ** 0.5
+
+    if norm < 1e-6:
+        return 0.0, 0.0, dx_px, dy_px, True
+
+    vx = speed * (dx / norm)
+    vy = speed * (dy / norm)
+    return vx, vy, dx_px, dy_px, False
+
+
 if __name__ == "__main__":
     CONNECT_ONLY = True  # если False — реальный взлёт
 
@@ -210,15 +222,24 @@ if __name__ == "__main__":
     SPEED = 0.25
     CMD_HZ = 10.0
 
-    # КЛЮЧЕВОЕ: “тишина” вокруг взлёта
-    ARM_TO_TAKEOFF_DELAY_SEC = 1.0       # пауза после arm() перед takeoff()
-    TAKEOFF_TO_GOTO_DELAY_SEC = 2.0      # пауза после takeoff() перед go_to_local_point()
-    POST_TAKEOFF_SILENCE_SEC = 4.0       # после достижения высоты ещё 4 секунды без manual_speed
-    PAUSE_CAMERA_DURING_TAKEOFF = True   # вот это часто решает проблему “сносит на взлёте”
+    # МИССИЯ: строгая последовательность маркеров + время зависания над каждым (сек)
+    # Пример: сначала 7 (3 секунды), потом 12 (5 секунд), потом 3 (2 секунды)
+    MISSION: List[Tuple[int, float]] = [
+        (7, 3.0),
+        (12, 5.0),
+        (3, 2.0),
+    ]
+
+    # “тишина” вокруг взлёта
+    ARM_TO_TAKEOFF_DELAY_SEC = 1.0
+    TAKEOFF_TO_GOTO_DELAY_SEC = 2.0
+    POST_TAKEOFF_SILENCE_SEC = 4.0
+    PAUSE_CAMERA_DURING_TAKEOFF = True
 
     SHOW_WINDOW = True
     RED = (0, 0, 255)
     GREEN = (0, 255, 0)
+    YELLOW = (0, 255, 255)
 
     tracker = ArucoTrackerThread()
     tracker.start()
@@ -227,25 +248,28 @@ if __name__ == "__main__":
     sender = CommandSenderThread(cmd=cmd, hz=CMD_HZ)
     sender.start()
 
-    visited: Set[int] = set()
-    last_target: Optional[int] = None
-    hold_green_until = 0.0
-    pending_color = RED
+    # индекс текущей цели в миссии
+    mission_idx = 0
+
+    # режим удержания над текущим маркером
+    holding_until = 0.0
+    holding_marker_id: Optional[int] = None
+
+    # для UI
+    last_report_target: Optional[int] = None
+    status_text = "SEARCH"
 
     try:
         if not CONNECT_ONLY:
             print("[INFO] Real flight mode (takeoff)")
 
-            # 1) Запретить manual_speed
             sender.set_target(0.0, 0.0, 0.0, 0.0)
             sender.set_send_enabled(False)
 
-            # 2) (Опционально) Поставить камеру на паузу
             if PAUSE_CAMERA_DURING_TAKEOFF:
                 tracker.set_paused(True)
                 print("[INFO] Camera paused during takeoff sequence.")
 
-            # 3) Взлёт и набор высоты + задержки между командами
             cmd.arm_takeoff_to_height(
                 TAKEOFF_HEIGHT,
                 arm_to_takeoff_delay=ARM_TO_TAKEOFF_DELAY_SEC,
@@ -253,16 +277,13 @@ if __name__ == "__main__":
             )
             print(f"[INFO] Hover reached: z={TAKEOFF_HEIGHT:.2f}m")
 
-            # 4) Ещё 4 секунды тишины (без manual_speed)
             print(f"[INFO] Post-takeoff silence: {POST_TAKEOFF_SILENCE_SEC:.1f}s (no manual_speed)")
             time.sleep(POST_TAKEOFF_SILENCE_SEC)
 
-            # 5) Возобновить камеру
             if PAUSE_CAMERA_DURING_TAKEOFF:
                 tracker.set_paused(False)
                 print("[INFO] Camera resumed.")
 
-            # 6) Разрешить manual_speed
             sender.set_send_enabled(True)
             print("[INFO] Manual speed enabled.")
         else:
@@ -280,55 +301,72 @@ if __name__ == "__main__":
             h, w = frame.shape[:2]
             cx0, cy0 = int(w / 2), int(h / 2)
 
-            vx, vy = 0.0, 0.0
-            pending_color = RED
-
-            if time.time() < hold_green_until:
-                pending_color = GREEN
-                vx, vy = 0.0, 0.0
+            # если миссия закончилась — стоим
+            if mission_idx >= len(MISSION):
+                sender.set_target(0.0, 0.0, 0.0, 0.0)
+                status_text = "DONE"
+                target_id = None
+                pending_color = YELLOW
             else:
-                if not markers:
-                    vx, vy = 0.0, 0.0
-                else:
-                    target_id = choose_next_marker(markers, visited)
-                    if target_id is None:
-                        vx, vy = 0.0, 0.0
-                    else:
-                        if target_id != last_target:
-                            print(f"[INFO] New target marker: {target_id}")
-                            last_target = target_id
+                target_id, hold_sec = MISSION[mission_idx]
 
+                if target_id != last_report_target:
+                    print(f"[INFO] Mission target #{mission_idx+1}/{len(MISSION)}: marker={target_id}, hold={hold_sec:.1f}s")
+                    last_report_target = target_id
+
+                now = time.time()
+
+                # Если сейчас в удержании — держим ноль скоростей до окончания таймера
+                if now < holding_until and holding_marker_id == target_id:
+                    sender.set_target(0.0, 0.0, 0.0, 0.0)
+                    status_text = f"HOLD {target_id} ({holding_until - now:.1f}s)"
+                    pending_color = GREEN
+                else:
+                    # удержание закончилось -> переход к следующей цели
+                    if holding_marker_id == target_id and holding_until > 0.0 and now >= holding_until:
+                        print(f"[INFO] Hold finished for marker {target_id}. Next target.")
+                        holding_until = 0.0
+                        holding_marker_id = None
+                        mission_idx += 1
+                        continue  # пересчёт на следующей итерации
+
+                    # не в удержании: надо искать/подлетать к текущей цели
+                    if target_id not in markers:
+                        # цель не видна — не дёргаемся (можно заменить на поиск/сканирование)
+                        sender.set_target(0.0, 0.0, 0.0, 0.0)
+                        status_text = f"SEARCH {target_id}"
+                        pending_color = RED
+                    else:
                         mi = markers[target_id]
                         dx_px = mi.cx - cx0
                         dy_px = mi.cy - cy0
-
                         centered = (abs(dx_px) <= CENTER_TOL_PX and abs(dy_px) <= CENTER_TOL_PX)
-                        if centered and (target_id not in visited):
-                            visited.add(target_id)
-                            print(f"[INFO] Marker {target_id} centered. Visited: {sorted(list(visited))}")
-                            hold_green_until = time.time() + 3.0
-                            pending_color = GREEN
-                            vx, vy = 0.0, 0.0
-                        else:
-                            dx = dx_px / (w / 2.0)
-                            dy = dy_px / (h / 2.0)
-                            norm = (dx * dx + dy * dy) ** 0.5
-                            if norm < 1e-6:
-                                vx, vy = 0.0, 0.0
-                            else:
-                                vx = SPEED * (dx / norm)
-                                vy = SPEED * (dy / norm)
-                            # если нужна инверсия Y — раскомментируй
-                            # vy = -vy
 
-            sender.set_target(vx=vx, vy=vy, vz=0.0, yaw_rate=0.0)
+                        if centered:
+                            # попали в центр -> старт удержания для ЭТОГО маркера
+                            holding_marker_id = target_id
+                            holding_until = time.time() + float(hold_sec)
+                            sender.set_target(0.0, 0.0, 0.0, 0.0)
+                            status_text = f"HOLD {target_id} ({hold_sec:.1f}s)"
+                            pending_color = GREEN
+                            print(f"[INFO] Marker {target_id} centered. Holding for {hold_sec:.1f}s")
+                        else:
+                            vx, vy, dx_px2, dy_px2, _ = compute_speed_to_center(mi, cx0, cy0, w, h, SPEED)
+                            sender.set_target(vx, vy, 0.0, 0.0)
+                            status_text = f"GO {target_id} dx={dx_px2} dy={dy_px2}"
+                            pending_color = RED
 
             if SHOW_WINDOW:
                 cv2.circle(frame, (cx0, cy0), 7, pending_color, -1)
-                cv2.putText(frame, f"Visited: {len(visited)}", (10, 25),
+
+                cv2.putText(frame, f"Mission: {mission_idx}/{len(MISSION)}", (10, 25),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                if last_target is not None:
-                    cv2.putText(frame, f"Target: {last_target}", (10, 55),
+                cv2.putText(frame, f"Status: {status_text}", (10, 55),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+                if mission_idx < len(MISSION):
+                    tid, hsec = MISSION[mission_idx]
+                    cv2.putText(frame, f"Target: {tid} hold={hsec:.1f}s", (10, 85),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
                 cv2.imshow("aruco_nav", frame)

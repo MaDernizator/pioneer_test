@@ -1,7 +1,7 @@
 import time
 import threading
 from dataclasses import dataclass
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Tuple, List
 
 import cv2
 
@@ -75,11 +75,6 @@ class ArucoTrackerThread(threading.Thread):
 
     def stop(self):
         self.running = False
-
-
-def choose_next_marker(markers: Dict[int, MarkerInfo], visited: Set[int]) -> Optional[int]:
-    candidates = [mid for mid in markers.keys() if mid not in visited]
-    return min(candidates) if candidates else None
 
 
 class DroneCommander:
@@ -227,7 +222,14 @@ if __name__ == "__main__":
     CENTER_TOL_M = 0.15
     LOOP_DT = 0.02
 
-    MARKER_HOLD_TIME = 3.0
+    # ------------------ ВАЖНО: ПЛАН МИССИИ ------------------
+    # Строгая последовательность: (marker_id, hold_time_seconds)
+    MARKER_PLAN: List[Tuple[int, float]] = [
+        (1, 2.0),
+        (7, 5.0),
+        (3, 3.0),
+    ]
+    # --------------------------------------------------------
 
     REACH_TIMEOUT = 15.0
     REACH_POLL_DT = 0.1
@@ -248,11 +250,14 @@ if __name__ == "__main__":
     nav.start()
 
     visited: Set[int] = set()
-    last_target: Optional[int] = None
     hold_until = 0.0
     current_state = "SEARCH"
 
     locked_goal: Optional[Tuple[float, float, float]] = None  # x,y,z
+
+    plan_idx = 0
+    last_target: Optional[int] = None
+    last_hold_time: float = 0.0
 
     try:
         if not DRY_RUN:
@@ -271,6 +276,17 @@ if __name__ == "__main__":
                 time.sleep(0.01)
                 continue
 
+            # Если план закончился — выходим
+            if plan_idx >= len(MARKER_PLAN):
+                current_state = "DONE"
+                if SHOW_WINDOW:
+                    cv2.putText(frame, "DONE: mission plan completed",
+                                (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.imshow("aruco_nav_go_to_point_locked", frame)
+                    cv2.waitKey(1)
+                print("[INFO] Mission completed: all markers processed.")
+                break
+
             h, w = frame.shape[:2]
             cx0, cy0 = int(w / 2), int(h / 2)
             center_color = RED
@@ -283,67 +299,67 @@ if __name__ == "__main__":
             if locked_goal is not None and nav_state in ("REACHED", "TIMEOUT"):
                 locked_goal = None
 
+            # Текущая цель строго по плану
+            target_id, hold_time = MARKER_PLAN[plan_idx]
+            last_target = target_id
+            last_hold_time = hold_time
+
+            # Режим зависания после центрирования
             if time.time() < hold_until:
                 center_color = GREEN
-                current_state = "HOVERING"
+                current_state = f"HOVERING({target_id})"
             else:
+                # Если летим по уже принятой цели — не мешаем навпотоку
                 if locked_goal is not None and nav_state == "MOVING":
-                    current_state = "FLYING_LOCKED"
+                    current_state = f"FLYING_LOCKED({target_id})"
                     center_color = RED
                 else:
-                    if not markers:
-                        current_state = "SEARCH"
+                    # Если маркера цели нет в кадре — просто ждём/ищем
+                    if target_id not in markers:
+                        current_state = f"SEARCH_TARGET({target_id})"
                         center_color = RED
                     else:
-                        target_id = choose_next_marker(markers, visited)
+                        mi = markers[target_id]
+                        dx_px = mi.cx - cx0
+                        dy_px = mi.cy - cy0
+                        centered_px = (abs(dx_px) <= CENTER_TOL_PX and abs(dy_px) <= CENTER_TOL_PX)
 
-                        if target_id is None:
-                            current_state = "SEARCH"
-                            center_color = RED
+                        # координаты маркера (dx,dy) в метрах относительно центра дрона
+                        dx_m, dy_m = pixel_to_drone_xy(mi.cx, mi.cy, drone_alt)
+                        centered_m = (abs(dx_m) <= CENTER_TOL_M and abs(dy_m) <= CENTER_TOL_M)
+
+                        if centered_px and centered_m and target_id not in visited:
+                            visited.add(target_id)
+                            hold_until = time.time() + hold_time
+                            current_state = f"HOVERING({target_id})"
+                            center_color = GREEN
+                            print(f"[INFO] Marker {target_id} centered -> hold {hold_time:.1f}s. "
+                                  f"Visited: {sorted(list(visited))}")
+                            # ВАЖНО: продвигаемся по плану сразу, но фактический "hold" удержит дрон на месте
+                            plan_idx += 1
                         else:
-                            if target_id != last_target:
-                                print(f"[INFO] New target marker: {target_id}")
-                                last_target = target_id
+                            current_state = f"FLYING({target_id})"
+                            center_color = RED
 
-                            mi = markers[target_id]
-                            dx_px = mi.cx - cx0
-                            dy_px = mi.cy - cy0
-                            centered_px = (abs(dx_px) <= CENTER_TOL_PX and abs(dy_px) <= CENTER_TOL_PX)
+                            target_x = drone_x + dx_m
+                            target_y = drone_y + dy_m
+                            goal = (target_x, target_y, TAKEOFF_HEIGHT)
 
-                            # ---- КЛЮЧЕВОЕ: координаты маркера (dx,dy) в метрах относительно центра дрона ----
-                            dx_m, dy_m = pixel_to_drone_xy(mi.cx, mi.cy, drone_alt)
-                            centered_m = (abs(dx_m) <= CENTER_TOL_M and abs(dy_m) <= CENTER_TOL_M)
-
-                            if centered_px and centered_m and target_id not in visited:
-                                visited.add(target_id)
-                                hold_until = time.time() + MARKER_HOLD_TIME
-                                current_state = "HOVERING"
-                                center_color = GREEN
-                                print(f"[INFO] Marker {target_id} centered. Visited: {sorted(list(visited))}")
-                            else:
-                                current_state = "FLYING"
-                                center_color = RED
-
-                                target_x = drone_x + dx_m
-                                target_y = drone_y + dy_m
-                                goal = (target_x, target_y, TAKEOFF_HEIGHT)
-
-                                now = time.monotonic()
-                                if now >= next_goal_try_t:
-                                    accepted = nav.submit_goal_if_idle(*goal)
-                                    if accepted:
-                                        locked_goal = goal
-                                    next_goal_try_t = now + GOAL_TRY_DT
+                            now = time.monotonic()
+                            if now >= next_goal_try_t:
+                                accepted = nav.submit_goal_if_idle(*goal)
+                                if accepted:
+                                    locked_goal = goal
+                                next_goal_try_t = now + GOAL_TRY_DT
 
             if SHOW_WINDOW:
                 cv2.circle(frame, (cx0, cy0), 7, center_color, -1)
 
-                cv2.putText(frame, f"Visited: {len(visited)} | State: {current_state} | NAV: {nav_state}",
+                cv2.putText(frame, f"Plan: {plan_idx}/{len(MARKER_PLAN)} | State: {current_state} | NAV: {nav_state}",
                             (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
-                if last_target is not None:
-                    cv2.putText(frame, f"Target: {last_target}", (10, 50),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+                cv2.putText(frame, f"Target(plan): {last_target} hold={last_hold_time:.1f}s",
+                            (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
                 cv2.putText(frame, f"Pos: ({drone_x:.2f}, {drone_y:.2f}) alt={drone_alt:.2f}m yaw=0",
                             (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
@@ -353,6 +369,7 @@ if __name__ == "__main__":
                     cv2.putText(frame, f"Locked goal: ({gx:+.2f},{gy:+.2f}) z={gz:.2f} yaw=0",
                                 (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
+                # Пишем относительное смещение только если целевой маркер виден
                 if last_target is not None and last_target in markers:
                     mi = markers[last_target]
                     dx_m, dy_m = pixel_to_drone_xy(mi.cx, mi.cy, drone_alt)
