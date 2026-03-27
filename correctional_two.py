@@ -3,27 +3,31 @@ import cv2
 
 from pioneer_sdk import Pioneer, Camera
 from pixel_projector import pixel_to_drone_xy
+from marker_map import MARKER_COORDS
 
 
 DRY_RUN = False
 YAW = 0.0
+MUST_EXIST = False   # один общий флаг для всех точек
 
 CENTER_TOL_PX = 40
 CENTER_TOL_M = 0.15
 CORRECTION_GAIN = 0.9
 MAX_CORRECTION_TRIES = 8
+MARKER_CHECK_TRIES = 20
+MARKER_CHECK_DT = 0.1
 
 SHOW_WINDOW = True
 
-# marker_id: (x, y, z, hold_time, use_correction)
-MARKERS = {
-    3: (0.0,  0.0, 1.5, 1.0, False),
-    2: (1.0,  0.0, 2.0, 5.0, True),
-    0: (1.0,  1.0, 2.0, 1.0, False),
-    4: (0.0,  1.0, 1.8, 1.0, True),
-    7: (-1.0, 1.0, 2.2, 5.0, True),
-    5: (-1.0, 0.0, 1.7, 1.0, False),
-    1: (0.0, -1.0, 1.5, 1.0, False),
+# marker_id: (z, hold_time, use_correction)
+MARKER_SETTINGS = {
+    3: (1.5, 1.0, False),
+    2: (2.0, 5.0, False),
+    0: (2.0, 1.0, False),
+    4: (1.8, 1.0, True),
+    7: (2.2, 5.0, True),
+    5: (1.7, 1.0, True),
+    1: (1.5, 1.0, True),
 }
 
 ROUTE = [3, 2, 0, 4, 7, 5, 1]
@@ -66,6 +70,21 @@ def detect_marker(frame, target_id):
             return cx, cy, corners, ids
 
     return None
+
+
+def wait_marker_visible(camera: Camera, marker_id: int):
+    for _ in range(MARKER_CHECK_TRIES):
+        frame = camera.get_cv_frame()
+        if frame is None or frame.size == 0:
+            time.sleep(MARKER_CHECK_DT)
+            continue
+
+        if detect_marker(frame, marker_id) is not None:
+            return True
+
+        time.sleep(MARKER_CHECK_DT)
+
+    return False
 
 
 def correct_over_marker(drone: Pioneer, camera: Camera, marker_id: int, target_z: float):
@@ -126,16 +145,22 @@ def correct_over_marker(drone: Pioneer, camera: Camera, marker_id: int, target_z
 
 
 def go_to_marker(drone: Pioneer, camera: Camera, marker_id: int, coord_shift):
-    base_x, base_y, base_z, hold_time, use_correction = MARKERS[marker_id]
-    shift_x, shift_y = coord_shift
+    base_x, base_y = MARKER_COORDS[marker_id]
+    z, hold_time, use_correction = MARKER_SETTINGS[marker_id]
 
+    shift_x, shift_y = coord_shift
     target_x = base_x + shift_x
     target_y = base_y + shift_y
-    target_z = base_z
+    target_z = z
 
     print(f"[INFO] Fly to marker {marker_id}: x={target_x:.2f}, y={target_y:.2f}, z={target_z:.2f}")
     drone.go_to_local_point(x=target_x, y=target_y, z=target_z, yaw=YAW)
     wait_until_reached(drone)
+
+    if MUST_EXIST:
+        print(f"[INFO] Check marker {marker_id} presence")
+        if not wait_marker_visible(camera, marker_id):
+            raise RuntimeError(f"Marker {marker_id} not found. Flight stopped.")
 
     if use_correction:
         print(f"[INFO] Correction enabled for marker {marker_id}")
@@ -154,10 +179,7 @@ def go_to_marker(drone: Pioneer, camera: Camera, marker_id: int, coord_shift):
                 f"[INFO] Marker {marker_id} real=({real_x:+.2f}, {real_y:+.2f}) "
                 f"planned=({target_x:+.2f}, {target_y:+.2f})"
             )
-            print(
-                f"[INFO] New global shift: "
-                f"dx={shift_x:+.2f}, dy={shift_y:+.2f}"
-            )
+            print(f"[INFO] New global shift: dx={shift_x:+.2f}, dy={shift_y:+.2f}")
 
     print(f"[INFO] Hold {hold_time:.1f} sec at marker {marker_id}")
     time.sleep(hold_time)
@@ -169,7 +191,7 @@ if __name__ == "__main__":
     drone = Pioneer()
     camera = Camera()
 
-    coord_shift = (0.0, 0.0)   # глобальная поправка только по X,Y
+    coord_shift = (0.0, 0.0)
 
     try:
         if not DRY_RUN:
@@ -183,20 +205,21 @@ if __name__ == "__main__":
             print("[INFO] DRY_RUN mode")
 
         for marker_id in ROUTE:
-            if marker_id not in MARKERS:
-                raise ValueError(f"Marker {marker_id} not found in MARKERS")
+            if marker_id not in MARKER_COORDS:
+                raise ValueError(f"Marker {marker_id} not found in MARKER_COORDS")
+            if marker_id not in MARKER_SETTINGS:
+                raise ValueError(f"Marker {marker_id} not found in MARKER_SETTINGS")
 
-            x, y, z, hold_time, use_correction = MARKERS[marker_id]
+            base_x, base_y = MARKER_COORDS[marker_id]
+            z, hold_time, use_correction = MARKER_SETTINGS[marker_id]
             sx, sy = coord_shift
 
             if DRY_RUN:
                 print(
                     f"[DRY] go_to_local_point("
-                    f"x={x + sx:.2f}, y={y + sy:.2f}, z={z:.2f}, yaw={YAW:.2f})"
+                    f"x={base_x + sx:.2f}, y={base_y + sy:.2f}, z={z:.2f}, yaw={YAW:.2f})"
                 )
-                if use_correction:
-                    print(f"[DRY] correction enabled for marker {marker_id}")
-                    print(f"[DRY] after centering, next points would be shifted only in X,Y")
+                print(f"[DRY] use_correction={use_correction}, must_exist={MUST_EXIST}")
                 print(f"[DRY] hold {hold_time:.1f} sec")
                 time.sleep(1)
             else:
@@ -206,6 +229,9 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print("[INFO] Interrupted by user")
+
+    except Exception as e:
+        print(f"[ERROR] {e}")
 
     finally:
         if SHOW_WINDOW:

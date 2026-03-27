@@ -218,7 +218,7 @@ class NavigatorThread(threading.Thread):
 
 
 if __name__ == "__main__":
-    DRY_RUN = False  # True: без arm/takeoff/land и go_to только печать
+    DRY_RUN = True  # True: без arm/takeoff/land и go_to только печать
 
     TAKEOFF_HEIGHT = 2.4
     CENTER_TOL_PX = 40
