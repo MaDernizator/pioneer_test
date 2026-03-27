@@ -98,6 +98,9 @@ class DroneCommander:
             return
         self.p.arm()
         self.p.takeoff()
+        self.p.go_to_local_point(x=0, y=0, z=z//2, yaw=0)
+        while not self.p.point_reached():
+            time.sleep(0.1)
         self.p.go_to_local_point(x=0, y=0, z=z, yaw=0)
         while not self.p.point_reached():
             time.sleep(0.1)
@@ -116,11 +119,11 @@ class DroneCommander:
     def get_pos_lps_xy(self) -> Tuple[float, float]:
         if self.dry_run:
             try:
-                pos = self.p.get_pos_lps()
+                pos = self.p.get_local_position_lps(get_last_received=True)
                 return float(pos[0]), float(pos[1])
             except Exception:
                 return 0.0, 0.0
-        pos = self.p.get_pos_lps()
+        pos = self.p.get_local_position_lps(get_last_received=True)
         return float(pos[0]), float(pos[1])
 
     def get_alt_m(self) -> float:
@@ -215,9 +218,9 @@ class NavigatorThread(threading.Thread):
 
 
 if __name__ == "__main__":
-    DRY_RUN = True  # True: без arm/takeoff/land и go_to только печать
+    DRY_RUN = False  # True: без arm/takeoff/land и go_to только печать
 
-    TAKEOFF_HEIGHT = 1.0
+    TAKEOFF_HEIGHT = 2.4
     CENTER_TOL_PX = 40
     CENTER_TOL_M = 0.15
     LOOP_DT = 0.02
@@ -225,10 +228,14 @@ if __name__ == "__main__":
     # ------------------ ВАЖНО: ПЛАН МИССИИ ------------------
     # Строгая последовательность: (marker_id, hold_time_seconds)
     MARKER_PLAN: List[Tuple[int, float]] = [
-        (1, 2.0),
+        (3, 1.0),
+        (2, 5.0),
+        (0, 1.0),
+        (4, 1.0),
         (7, 5.0),
-        (3, 3.0),
-    ]
+        (5, 1.0),
+        (1, 1.0)
+      ]
     # --------------------------------------------------------
 
     REACH_TIMEOUT = 15.0
@@ -327,7 +334,8 @@ if __name__ == "__main__":
                         # координаты маркера (dx,dy) в метрах относительно центра дрона
                         dx_m, dy_m = pixel_to_drone_xy(mi.cx, mi.cy, drone_alt)
                         centered_m = (abs(dx_m) <= CENTER_TOL_M and abs(dy_m) <= CENTER_TOL_M)
-
+                        dx_m *= 0.9
+                        dy_m *= 0.9
                         if centered_px and centered_m and target_id not in visited:
                             visited.add(target_id)
                             hold_until = time.time() + hold_time
@@ -387,6 +395,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("[INFO] KeyboardInterrupt -> exiting.")
     finally:
+        cmd.go_to_local_point(0,0, TAKEOFF_HEIGHT)
+        while not cmd.point_reached():
+            time.sleep(0.1)
         nav.stop()
         tracker.stop()
         nav.join(timeout=2.0)

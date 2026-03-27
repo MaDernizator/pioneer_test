@@ -121,11 +121,11 @@ class DroneCommander:
     def get_pos_lps_xy(self) -> Tuple[float, float]:
         if self.dry_run:
             try:
-                pos = self.p.get_pos_lps()
+                pos = self.p.get_local_position_lps(get_last_received=True)
                 return float(pos[0]), float(pos[1])
             except Exception:
                 return 0.0, 0.0
-        pos = self.p.get_pos_lps()
+        pos = self.p.get_local_position_lps(get_last_received=True)
         return float(pos[0]), float(pos[1])
 
     def get_alt_m(self) -> float:
@@ -220,9 +220,9 @@ class NavigatorThread(threading.Thread):
 
 
 if __name__ == "__main__":
-    DRY_RUN = True  # True: без arm/takeoff/land и go_to только печать
+    DRY_RUN = False  # True: без arm/takeoff/land и go_to только печать
 
-    TAKEOFF_HEIGHT = 1.0
+    TAKEOFF_HEIGHT = 1.5
     CENTER_TOL_PX = 40
     CENTER_TOL_M = 0.15
     LOOP_DT = 0.02

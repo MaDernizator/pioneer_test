@@ -19,7 +19,7 @@ class MarkerInfo:
 
 
 class ArucoTrackerThread(threading.Thread):
-    def __init__(self, dict_name=cv2.aruco.DICT_4X4_50):
+    def __init__(self, dict_name=cv2.aruco.DICT_4X4_250):
         super().__init__(daemon=True)
         self.running = True
         self.lock = threading.Lock()
@@ -128,7 +128,7 @@ class DroneCommander:
             time.sleep(0.1)
 
     def send_manual_speed_body_fixed(self, vx: float, vy: float, vz: float, yaw_rate: float):
-        self.p.set_manual_speed_body_fixed(vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate)
+        self.p.set_manual_speed_body_fixed(vx=vx, vy=-vy, vz=vz, yaw_rate=yaw_rate)
 
     def land_and_close(self):
         if not self.connect_only:
@@ -205,9 +205,9 @@ class CommandSenderThread(threading.Thread):
 if __name__ == "__main__":
     CONNECT_ONLY = True  # если False — реальный взлёт
 
-    TAKEOFF_HEIGHT = 1.0
-    CENTER_TOL_PX = 40
-    SPEED = 0.25
+    TAKEOFF_HEIGHT = 1.8
+    CENTER_TOL_PX = 20
+    SPEED = 0.4
     CMD_HZ = 10.0
 
     # КЛЮЧЕВОЕ: “тишина” вокруг взлёта
