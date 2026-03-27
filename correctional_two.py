@@ -5,6 +5,7 @@ from pioneer_sdk import Pioneer, Camera
 from pixel_projector import pixel_to_drone_xy
 from marker_map import MARKER_COORDS
 
+HEIGHT = 2.0
 
 DRY_RUN = False
 YAW = 0.0
@@ -21,13 +22,13 @@ SHOW_WINDOW = True
 
 # marker_id: (z, hold_time, use_correction)
 MARKER_SETTINGS = {
-    3: (1.5, 1.0, False),
-    2: (2.0, 5.0, False),
-    0: (2.0, 1.0, False),
-    4: (1.8, 1.0, True),
-    7: (2.2, 5.0, True),
-    5: (1.7, 1.0, True),
-    1: (1.5, 1.0, True),
+    3: (HEIGHT, 1.0, False),
+    2: (HEIGHT, 5.0, False),
+    0: (HEIGHT, 1.0, False),
+    4: (HEIGHT, 1.0, True),
+    7: (HEIGHT, 5.0, True),
+    5: (HEIGHT, 1.0, True),
+    1: (HEIGHT, 1.0, True),
 }
 
 ROUTE = [3, 2, 0, 4, 7, 5, 1]
@@ -45,9 +46,9 @@ def wait_until_reached(drone: Pioneer):
 
 def get_altitude(drone: Pioneer) -> float:
     try:
-        return float(drone.get_dist_sensor_data())
+        return float(drone.get_dist_sensor_data(get_last_received=True))
     except Exception:
-        return 1.0
+        return HEIGHT
 
 
 def get_xy(drone: Pioneer):
