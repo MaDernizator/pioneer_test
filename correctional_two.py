@@ -5,7 +5,7 @@ from pioneer_sdk import Pioneer, Camera
 from pixel_projector import pixel_to_drone_xy
 from marker_map import MARKER_COORDS
 
-HEIGHT = 1.8
+HEIGHT = 1.6
 
 DRY_RUN = False
 YAW = 0.0
