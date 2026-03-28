@@ -5,11 +5,11 @@ from pioneer_sdk import Pioneer, Camera
 from pixel_projector import pixel_to_drone_xy
 from marker_map import MARKER_COORDS
 
-HEIGHT = 2.0
+HEIGHT = 1.8
 
 DRY_RUN = False
 YAW = 0.0
-MUST_EXIST = False   # один общий флаг для всех точек
+MUST_EXIST = True
 
 CENTER_TOL_PX = 40
 CENTER_TOL_M = 0.15
@@ -20,19 +20,25 @@ MARKER_CHECK_DT = 0.1
 
 SHOW_WINDOW = True
 
-# marker_id: (z, hold_time, use_correction)
-MARKER_SETTINGS = {
-    3: (HEIGHT, 1.0, False),
-    2: (HEIGHT, 5.0, False),
-    0: (HEIGHT, 1.0, False),
-    4: (HEIGHT, 1.0, True),
-    7: (HEIGHT, 5.0, True),
-    5: (HEIGHT, 1.0, True),
-    1: (HEIGHT, 1.0, True),
-}
-
-ROUTE = [3, 2, 0, 4, 7, 5, 1]
-
+# Маршрут:
+# (marker_id, marker_index, z, hold_time, use_correction)
+#
+# marker_index = какой по счёту маркер с таким id брать:
+#   0 -> первый
+#   1 -> второй
+#   2 -> третий
+ROUTE = [
+    (27, 0, HEIGHT, 0.0, False),
+    (7, 0, HEIGHT, 5.0, False),
+    (12, 0, HEIGHT, 0.0, False),
+    (25, 0, HEIGHT, 5.0, False),
+    (11, 0, HEIGHT, 0.0, False),
+    (17, 0, HEIGHT, 0, False),
+    (15, 0, HEIGHT, 0, False),
+    (15, 1, HEIGHT - 1, 5, False),
+    (6, 0, HEIGHT - 1, 0, False),
+    (6, 1, HEIGHT, 0, False),
+]
 
 aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 aruco_params = cv2.aruco.DetectorParameters()
@@ -46,14 +52,27 @@ def wait_until_reached(drone: Pioneer):
 
 def get_altitude(drone: Pioneer) -> float:
     try:
-        return float(drone.get_dist_sensor_data(get_last_received=True))
+        return float(drone.get_dist_sensor_data())
     except Exception:
-        return HEIGHT
+        return 1.0
 
 
 def get_xy(drone: Pioneer):
     pos = drone.get_local_position_lps(get_last_received=True)
     return float(pos[0]), float(pos[1])
+
+
+def get_marker_coords(marker_id: int, marker_index: int):
+    found = [m for m in MARKER_COORDS if m["marker_id"] == marker_id]
+
+    if marker_index < 0 or marker_index >= len(found):
+        raise ValueError(
+            f"Marker ({marker_id}, index={marker_index}) not found. "
+            f"Available count: {len(found)}"
+        )
+
+    marker = found[marker_index]
+    return float(marker["x"]), float(marker["y"])
 
 
 def detect_marker(frame, target_id):
@@ -145,16 +164,19 @@ def correct_over_marker(drone: Pioneer, camera: Camera, marker_id: int, target_z
     return False
 
 
-def go_to_marker(drone: Pioneer, camera: Camera, marker_id: int, coord_shift):
-    base_x, base_y = MARKER_COORDS[marker_id]
-    z, hold_time, use_correction = MARKER_SETTINGS[marker_id]
+def go_to_marker(drone: Pioneer, camera: Camera, marker_id: int, marker_index: int,
+                 z: float, hold_time: float, use_correction: bool, coord_shift):
+    base_x, base_y = get_marker_coords(marker_id, marker_index)
 
     shift_x, shift_y = coord_shift
     target_x = base_x + shift_x
     target_y = base_y + shift_y
     target_z = z
 
-    print(f"[INFO] Fly to marker {marker_id}: x={target_x:.2f}, y={target_y:.2f}, z={target_z:.2f}")
+    print(
+        f"[INFO] Fly to marker {marker_id}[{marker_index}]: "
+        f"x={target_x:.2f}, y={target_y:.2f}, z={target_z:.2f}"
+    )
     drone.go_to_local_point(x=target_x, y=target_y, z=target_z, yaw=YAW)
     wait_until_reached(drone)
 
@@ -177,12 +199,13 @@ def go_to_marker(drone: Pioneer, camera: Camera, marker_id: int, coord_shift):
             shift_y += error_y
 
             print(
-                f"[INFO] Marker {marker_id} real=({real_x:+.2f}, {real_y:+.2f}) "
+                f"[INFO] Marker {marker_id}[{marker_index}] "
+                f"real=({real_x:+.2f}, {real_y:+.2f}) "
                 f"planned=({target_x:+.2f}, {target_y:+.2f})"
             )
             print(f"[INFO] New global shift: dx={shift_x:+.2f}, dy={shift_y:+.2f}")
 
-    print(f"[INFO] Hold {hold_time:.1f} sec at marker {marker_id}")
+    print(f"[INFO] Hold {hold_time:.1f} sec at marker {marker_id}[{marker_index}]")
     time.sleep(hold_time)
 
     return shift_x, shift_y
@@ -205,26 +228,30 @@ if __name__ == "__main__":
         else:
             print("[INFO] DRY_RUN mode")
 
-        for marker_id in ROUTE:
-            if marker_id not in MARKER_COORDS:
-                raise ValueError(f"Marker {marker_id} not found in MARKER_COORDS")
-            if marker_id not in MARKER_SETTINGS:
-                raise ValueError(f"Marker {marker_id} not found in MARKER_SETTINGS")
-
-            base_x, base_y = MARKER_COORDS[marker_id]
-            z, hold_time, use_correction = MARKER_SETTINGS[marker_id]
-            sx, sy = coord_shift
-
+        for marker_id, marker_index, z, hold_time, use_correction in ROUTE:
             if DRY_RUN:
+                base_x, base_y = get_marker_coords(marker_id, marker_index)
+                sx, sy = coord_shift
+
                 print(
                     f"[DRY] go_to_local_point("
                     f"x={base_x + sx:.2f}, y={base_y + sy:.2f}, z={z:.2f}, yaw={YAW:.2f})"
                 )
+                print(f"[DRY] marker={marker_id}[{marker_index}]")
                 print(f"[DRY] use_correction={use_correction}, must_exist={MUST_EXIST}")
                 print(f"[DRY] hold {hold_time:.1f} sec")
                 time.sleep(1)
             else:
-                coord_shift = go_to_marker(drone, camera, marker_id, coord_shift)
+                coord_shift = go_to_marker(
+                    drone=drone,
+                    camera=camera,
+                    marker_id=marker_id,
+                    marker_index=marker_index,
+                    z=z,
+                    hold_time=hold_time,
+                    use_correction=use_correction,
+                    coord_shift=coord_shift,
+                )
 
         print("[INFO] Mission completed")
 
