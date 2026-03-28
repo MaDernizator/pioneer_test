@@ -1,7 +1,7 @@
 import time
 import threading
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple
 
 import cv2
 
@@ -17,7 +17,7 @@ from marker_map import MARKER_COORDS
 
 HEIGHT = 1.6
 
-DRY_RUN = True
+DRY_RUN = False
 YAW = 0.0
 MUST_EXIST = True
 
@@ -25,34 +25,43 @@ CENTER_TOL_PX = 40
 CENTER_TOL_M = 0.15
 CORRECTION_GAIN = 0.9
 MAX_CORRECTION_TRIES = 8
+CORRECTION_PRE_SLEEP = 1.0   # пауза перед каждой коррекцией
+
 MARKER_CHECK_TRIES = 20
 MARKER_CHECK_DT = 0.1
 
+REACH_TIMEOUT = 15.0
+REACH_POLL_DT = 0.1
+
+GOAL_TRY_HZ = 5.0
+GOAL_TRY_DT = 1.0 / GOAL_TRY_HZ
+
+CAM_FPS = 30.0
+CAM_DT = 1.0 / CAM_FPS
+
+LOOP_DT = 0.02
+
 SHOW_WINDOW = True
+WINDOW_NAME = "camera_debug"
+
+RED = (0, 0, 255)
+GREEN = (0, 255, 0)
+WHITE = (255, 255, 255)
 
 # Маршрут:
 # (marker_id, marker_index, z, hold_time, use_correction)
 ROUTE = [
-    (27, 0, HEIGHT, 0.0, True),
+    (27, 0, HEIGHT, 0.0, False),
     (7, 0, HEIGHT, 5.0, True),
     (12, 0, HEIGHT, 0.0, True),
     (25, 0, HEIGHT, 5.0, True),
     (11, 0, HEIGHT, 0.0, True),
-    (17, 0, HEIGHT, 0, True),
-    (15, 0, HEIGHT, 0, True),
-    (15, 1, HEIGHT - 1, 5, True),
-    (6, 0, HEIGHT - 1, 0, True),
-    (6, 1, HEIGHT, 0, True),
+    (17, 0, HEIGHT, 0.0, True),
+    (15, 0, HEIGHT, 0.0, True),
+    (15, 1, HEIGHT - 1, 5.0, True),
+    (6, 0, HEIGHT - 1, 0.0, True),
+    (6, 1, HEIGHT, 0.0, True),
 ]
-
-REACH_TIMEOUT = 15.0
-REACH_POLL_DT = 0.1
-GOAL_TRY_HZ = 5.0
-GOAL_TRY_DT = 1.0 / GOAL_TRY_HZ
-LOOP_DT = 0.02
-
-RED = (0, 0, 255)
-GREEN = (0, 255, 0)
 
 
 @dataclass
@@ -67,20 +76,45 @@ class ArucoTrackerThread(threading.Thread):
         self.running = True
         self.lock = threading.Lock()
         self.camera = Camera() if Camera is not None else None
+
         self.latest_frame = None
         self.markers: Dict[int, MarkerInfo] = {}
+        self.status_text = ""
+        self.status_color = WHITE
+        self.window_fps = 0.0
 
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(dict_name)
         self.aruco_params = cv2.aruco.DetectorParameters()
         self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+
+    def set_status(self, text: str, color=WHITE):
+        with self.lock:
+            self.status_text = text
+            self.status_color = color
+
+    def get_snapshot(self):
+        with self.lock:
+            frame = None if self.latest_frame is None else self.latest_frame.copy()
+            markers = dict(self.markers)
+        return frame, markers
 
     def run(self):
         if self.camera is None:
             print("[ERROR] Camera is unavailable (pioneer_sdk import failed).")
             return
 
+        last_frame_t = time.monotonic()
+        fps_t0 = time.monotonic()
+        fps_count = 0
+
         while self.running:
             try:
+                now = time.monotonic()
+                dt = now - last_frame_t
+                if dt < CAM_DT:
+                    time.sleep(CAM_DT - dt)
+                last_frame_t = time.monotonic()
+
                 frame = self.camera.get_cv_frame()
                 if frame is None or (hasattr(frame, "size") and frame.size == 0):
                     time.sleep(0.01)
@@ -99,20 +133,59 @@ class ArucoTrackerThread(threading.Thread):
 
                     cv2.aruco.drawDetectedMarkers(frame, corners, ids)
                     for mid, mi in markers_local.items():
-                        cv2.circle(frame, (mi.cx, mi.cy), 5, (0, 0, 255), -1)
+                        cv2.circle(frame, (mi.cx, mi.cy), 5, RED, -1)
                         cv2.putText(
                             frame,
                             str(mid),
                             (mi.cx + 8, mi.cy - 8),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.7,
-                            (0, 0, 255),
+                            RED,
                             2,
                         )
 
+                h, w = frame.shape[:2]
+                cx0, cy0 = w // 2, h // 2
+                cv2.circle(frame, (cx0, cy0), 7, WHITE, 2)
+
+                fps_count += 1
+                t_now = time.monotonic()
+                if t_now - fps_t0 >= 1.0:
+                    self.window_fps = fps_count / (t_now - fps_t0)
+                    fps_t0 = t_now
+                    fps_count = 0
+
                 with self.lock:
-                    self.latest_frame = frame
+                    status_text = self.status_text
+                    status_color = self.status_color
+                    self.latest_frame = frame.copy()
                     self.markers = markers_local
+                    fps_value = self.window_fps
+
+                if SHOW_WINDOW:
+                    if status_text:
+                        cv2.putText(
+                            frame,
+                            status_text,
+                            (10, 25),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            status_color,
+                            2,
+                        )
+
+                    cv2.putText(
+                        frame,
+                        f"FPS: {fps_value:.1f}",
+                        (10, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        WHITE,
+                        2,
+                    )
+
+                    cv2.imshow(WINDOW_NAME, frame)
+                    cv2.waitKey(1)
 
             except cv2.error as e:
                 print(f"[Video] OpenCV error (ignored): {e}")
@@ -171,13 +244,6 @@ class DroneCommander:
 
 
 class NavigatorThread(threading.Thread):
-    """
-    Старый рабочий паттерн:
-      - принимает цель
-      - отправляет go_to_local_point один раз
-      - ждёт point_reached
-      - пока MOVING, новые цели игнорирует
-    """
     def __init__(self, cmd: DroneCommander, reach_timeout: float = 15.0, poll_dt: float = 0.1):
         super().__init__(daemon=True)
         self.cmd = cmd
@@ -189,7 +255,7 @@ class NavigatorThread(threading.Thread):
 
         self._goal: Optional[Tuple[float, float, float]] = None
         self._has_goal = False
-        self._state = "IDLE"  # IDLE, MOVING, REACHED, TIMEOUT
+        self._state = "IDLE"
 
     def stop(self):
         with self._cv:
@@ -263,8 +329,7 @@ def wait_until_reached(cmd: DroneCommander):
 
 def wait_marker_visible(tracker: ArucoTrackerThread, marker_id: int) -> bool:
     for _ in range(MARKER_CHECK_TRIES):
-        with tracker.lock:
-            markers = dict(tracker.markers)
+        _, markers = tracker.get_snapshot()
         if marker_id in markers:
             return True
         time.sleep(MARKER_CHECK_DT)
@@ -278,20 +343,12 @@ def center_over_marker(
     marker_id: int,
     target_z: float,
 ) -> bool:
-    """
-    Центрирование по старой рабочей логике:
-      - живые кадры из tracker
-      - коррекционные цели через nav.submit_goal_if_idle(...)
-      - повторная оценка после каждого движения
-    """
     locked_goal: Optional[Tuple[float, float, float]] = None
     next_goal_try_t = time.monotonic()
     tries_sent = 0
 
     while True:
-        with tracker.lock:
-            frame = tracker.latest_frame
-            markers = dict(tracker.markers)
+        frame, markers = tracker.get_snapshot()
 
         if frame is None or (hasattr(frame, "size") and frame.size == 0):
             time.sleep(0.01)
@@ -299,7 +356,6 @@ def center_over_marker(
 
         h, w = frame.shape[:2]
         cx0, cy0 = int(w / 2), int(h / 2)
-        center_color = RED
 
         drone_x, drone_y = cmd.get_pos_lps_xy()
         drone_alt = cmd.get_alt_m()
@@ -308,141 +364,76 @@ def center_over_marker(
         if locked_goal is not None and nav_state in ("REACHED", "TIMEOUT"):
             locked_goal = None
             if nav_state == "TIMEOUT":
+                tracker.set_status(f"CENTER TIMEOUT {marker_id}", RED)
                 print(f"[WARN] Correction timeout for marker {marker_id}")
                 return False
 
         if locked_goal is not None and nav_state == "MOVING":
-            state_text = f"CENTERING_LOCKED({marker_id})"
+            tracker.set_status(f"CENTERING_LOCKED({marker_id})", RED)
+            time.sleep(LOOP_DT)
+            continue
 
-        else:
-            if marker_id not in markers:
-                state_text = f"SEARCH_TARGET({marker_id})"
+        if marker_id not in markers:
+            tracker.set_status(f"SEARCH_TARGET({marker_id})", RED)
+            time.sleep(LOOP_DT)
+            continue
 
-                if SHOW_WINDOW:
-                    cv2.circle(frame, (cx0, cy0), 7, center_color, -1)
-                    cv2.putText(
-                        frame,
-                        state_text,
-                        (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        (255, 255, 255),
-                        2,
-                    )
-                    cv2.imshow("marker_correction", frame)
-                    cv2.waitKey(1)
+        mi = markers[marker_id]
+        dx_px = mi.cx - cx0
+        dy_px = mi.cy - cy0
+        centered_px = abs(dx_px) <= CENTER_TOL_PX and abs(dy_px) <= CENTER_TOL_PX
 
+        dx_m, dy_m = pixel_to_drone_xy(mi.cx, mi.cy, drone_alt)
+        centered_m = abs(dx_m) <= CENTER_TOL_M and abs(dy_m) <= CENTER_TOL_M
+
+        raw_dx_m = dx_m
+        raw_dy_m = dy_m
+
+        dx_m *= CORRECTION_GAIN
+        dy_m *= CORRECTION_GAIN
+
+        if centered_px and centered_m:
+            tracker.set_status(f"CENTERED({marker_id})", GREEN)
+            print(f"[INFO] Marker {marker_id} centered")
+            return True
+
+        target_x = drone_x + dx_m
+        target_y = drone_y + dy_m
+        goal = (target_x, target_y, target_z)
+
+        now = time.monotonic()
+        if now >= next_goal_try_t and tries_sent < MAX_CORRECTION_TRIES:
+            tracker.set_status(
+                f"STABILIZE({marker_id}) {CORRECTION_PRE_SLEEP:.1f}s",
+                WHITE,
+            )
+            time.sleep(CORRECTION_PRE_SLEEP)
+
+            # после паузы ещё раз проверяем, не занялся ли навигатор чем-то
+            if nav.get_state() == "MOVING":
+                next_goal_try_t = time.monotonic() + GOAL_TRY_DT
                 time.sleep(LOOP_DT)
                 continue
 
-            mi = markers[marker_id]
-            dx_px = mi.cx - cx0
-            dy_px = mi.cy - cy0
-            centered_px = abs(dx_px) <= CENTER_TOL_PX and abs(dy_px) <= CENTER_TOL_PX
-
-            dx_m, dy_m = pixel_to_drone_xy(mi.cx, mi.cy, drone_alt)
-            centered_m = abs(dx_m) <= CENTER_TOL_M and abs(dy_m) <= CENTER_TOL_M
-
-            raw_dx_m = dx_m
-            raw_dy_m = dy_m
-
-            dx_m *= CORRECTION_GAIN
-            dy_m *= CORRECTION_GAIN
-
-            if centered_px and centered_m:
-                center_color = GREEN
-                state_text = f"CENTERED({marker_id})"
-
-                if SHOW_WINDOW:
-                    cv2.circle(frame, (cx0, cy0), 7, center_color, -1)
-                    cv2.putText(
-                        frame,
-                        state_text,
-                        (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        (255, 255, 255),
-                        2,
-                    )
-                    cv2.putText(
-                        frame,
-                        f"Marker rel: dx={raw_dx_m:+.2f} dy={raw_dy_m:+.2f}",
-                        (10, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        (255, 255, 255),
-                        2,
-                    )
-                    cv2.imshow("marker_correction", frame)
-                    cv2.waitKey(1)
-
-                print(f"[INFO] Marker {marker_id} centered")
-                return True
-
-            state_text = f"CENTERING({marker_id})"
-            target_x = drone_x + dx_m
-            target_y = drone_y + dy_m
-            goal = (target_x, target_y, target_z)
-
-            now = time.monotonic()
-            if now >= next_goal_try_t and tries_sent < MAX_CORRECTION_TRIES:
-                accepted = nav.submit_goal_if_idle(*goal)
-                if accepted:
-                    locked_goal = goal
-                    tries_sent += 1
-                    print(
-                        f"[INFO] Correction {tries_sent}: "
-                        f"dx={raw_dx_m:+.2f}, dy={raw_dy_m:+.2f}"
-                    )
-                next_goal_try_t = now + GOAL_TRY_DT
-
-            if tries_sent >= MAX_CORRECTION_TRIES and locked_goal is None:
-                print(f"[WARN] Marker {marker_id} was not centered exactly")
-                return False
-
-            if SHOW_WINDOW:
-                cv2.circle(frame, (cx0, cy0), 7, center_color, -1)
-                cv2.putText(
-                    frame,
-                    state_text,
-                    (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    (255, 255, 255),
-                    2,
+            accepted = nav.submit_goal_if_idle(*goal)
+            if accepted:
+                locked_goal = goal
+                tries_sent += 1
+                print(
+                    f"[INFO] Correction {tries_sent}: "
+                    f"dx={raw_dx_m:+.2f}, dy={raw_dy_m:+.2f}"
                 )
-                cv2.putText(
-                    frame,
-                    f"Pos: ({drone_x:.2f}, {drone_y:.2f}) alt={drone_alt:.2f}m yaw=0",
-                    (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    (255, 255, 255),
-                    2,
-                )
-                cv2.putText(
-                    frame,
-                    f"Marker rel: dx={raw_dx_m:+.2f} dy={raw_dy_m:+.2f}",
-                    (10, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    (255, 255, 255),
-                    2,
-                )
-                if locked_goal is not None:
-                    gx, gy, gz = locked_goal
-                    cv2.putText(
-                        frame,
-                        f"Locked goal: ({gx:+.2f},{gy:+.2f}) z={gz:.2f}",
-                        (10, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        (255, 255, 255),
-                        2,
-                    )
-                cv2.imshow("marker_correction", frame)
-                cv2.waitKey(1)
+            next_goal_try_t = time.monotonic() + GOAL_TRY_DT
 
+        if tries_sent >= MAX_CORRECTION_TRIES and locked_goal is None:
+            tracker.set_status(f"CENTER FAILED({marker_id})", RED)
+            print(f"[WARN] Marker {marker_id} was not centered exactly")
+            return False
+
+        tracker.set_status(
+            f"CENTERING({marker_id}) dx={raw_dx_m:+.2f} dy={raw_dy_m:+.2f}",
+            RED,
+        )
         time.sleep(LOOP_DT)
 
 
@@ -464,6 +455,7 @@ def go_to_marker(
     target_y = base_y + shift_y
     target_z = z
 
+    tracker.set_status(f"FLY TO {marker_id}[{marker_index}]", WHITE)
     print(
         f"[INFO] Fly to marker {marker_id}[{marker_index}]: "
         f"x={target_x:.2f}, y={target_y:.2f}, z={target_z:.2f}"
@@ -473,6 +465,7 @@ def go_to_marker(
     wait_until_reached(cmd)
 
     if MUST_EXIST:
+        tracker.set_status(f"CHECK MARKER {marker_id}", WHITE)
         print(f"[INFO] Check marker {marker_id} presence")
         if not wait_marker_visible(tracker, marker_id):
             raise RuntimeError(f"Marker {marker_id} not found. Flight stopped.")
@@ -503,6 +496,7 @@ def go_to_marker(
             )
             print(f"[INFO] New global shift: dx={shift_x:+.2f}, dy={shift_y:+.2f}")
 
+    tracker.set_status(f"HOLD {marker_id}[{marker_index}] {hold_time:.1f}s", GREEN)
     print(f"[INFO] Hold {hold_time:.1f} sec at marker {marker_id}[{marker_index}]")
     time.sleep(hold_time)
 
@@ -532,6 +526,7 @@ if __name__ == "__main__":
                 base_x, base_y = get_marker_coords(marker_id, marker_index)
                 sx, sy = coord_shift
 
+                tracker.set_status(f"DRY {marker_id}[{marker_index}]", WHITE)
                 print(
                     f"[DRY] go_to_local_point("
                     f"x={base_x + sx:.2f}, y={base_y + sy:.2f}, z={z:.2f}, yaw={YAW:.2f})"
@@ -539,7 +534,7 @@ if __name__ == "__main__":
                 print(f"[DRY] marker={marker_id}[{marker_index}]")
                 print(f"[DRY] use_correction={use_correction}, must_exist={MUST_EXIST}")
                 print(f"[DRY] hold {hold_time:.1f} sec")
-                time.sleep(1)
+                time.sleep(max(1.0, hold_time))
             else:
                 coord_shift = go_to_marker(
                     cmd=cmd,
@@ -553,12 +548,14 @@ if __name__ == "__main__":
                     coord_shift=coord_shift,
                 )
 
+        tracker.set_status("MISSION COMPLETED", GREEN)
         print("[INFO] Mission completed")
 
     except KeyboardInterrupt:
         print("[INFO] Interrupted by user")
 
     except Exception as e:
+        tracker.set_status(f"ERROR: {e}", RED)
         print(f"[ERROR] {e}")
 
     finally:
